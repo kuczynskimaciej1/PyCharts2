@@ -22,6 +22,8 @@ def authenticate_spotify():
     user_info = spotify.me()
     print(f"Logged in as: {user_info['display_name']} ({user_info['email']})")
 
+
+
 def ensure_token_valid():
     global token_info, spotify
 
@@ -29,11 +31,22 @@ def ensure_token_valid():
         token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
         spotify = spotipy.Spotify(auth=token_info['access_token'])
 
-if __name__ == "__main__":
-    authenticate_spotify()
-    # Example: Ensure token validity before making API calls
+
+
+def fetch_tracks_info():
+    track_ids = []
+    with open("all_nodupl.txt", "r") as file:
+        track_ids.append([file.readline() for _ in range(100)])
+
     ensure_token_valid()
-    # Example Spotify API call (get current user's playlists)
-    playlists = spotify.current_user_playlists()
-    for playlist in playlists['items']:
-        print(f"{playlist['name']} - {playlist['tracks']['total']} tracks")
+    ids_param = ""
+    for element in track_ids[0]:
+        print(element)
+        element = element.rstrip()
+        ids_param = ids_param + element + ","
+
+    ids_param = ids_param[:-1]
+    print(ids_param)
+    response = spotify.tracks(tracks=ids_param)
+
+    return response
