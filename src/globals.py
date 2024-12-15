@@ -2,6 +2,8 @@ import spotipy
 import os
 import json
 import pandas as pd
+import webbrowser
+from glob import glob
 from spotipy.oauth2 import SpotifyOAuth
 from secrets import token_hex
 
@@ -26,3 +28,4 @@ sp_oauth = SpotifyOAuth(client_id = SPOTIPY_CLIENT_ID,
                         redirect_uri = SPOTIPY_REDIRECT_URI,
                         state = token_hex(16),
                         scope = "user-library-read,user-library-modify,user-follow-read,user-follow-modify,playlist-modify-private,playlist-modify-public,user-read-private,user-read-email,user-read-playback-position,user-top-read,user-read-recently-played,ugc-image-upload")
+
