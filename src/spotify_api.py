@@ -36,17 +36,21 @@ def ensure_token_valid():
 def fetch_tracks_info():
     track_ids = []
     with open("all_nodupl.txt", "r") as file:
-        track_ids.append([file.readline() for _ in range(100)])
+        track_ids.append([file.readline() for _ in range(50)])
 
     ensure_token_valid()
-    ids_param = ""
-    for element in track_ids[0]:
-        print(element)
-        element = element.rstrip()
-        ids_param = ids_param + element + ","
+    ids_param = track_ids[0]
+    ids_param2 = []
 
-    ids_param = ids_param[:-1]
-    print(ids_param)
-    response = spotify.tracks(tracks=ids_param)
+    #ids_param = ""
+    for element in ids_param:
+        #print(element)
+        ids_param2.append(element[:-1])
+        #ids_param = ids_param + element + ","
 
-    return response
+    #ids_param = ids_param[:-1]
+    #print(ids_param)
+    response = spotify.tracks(tracks=ids_param2, market="PL")
+    response2 = spotify.audio_features(tracks=ids_param2[0])
+
+    print(response2)
