@@ -1,5 +1,4 @@
 import globals
-import data
 import spotify_api
 
 def start():
