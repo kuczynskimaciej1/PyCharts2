@@ -1,6 +1,4 @@
 import spotipy
-import pandas as pd
-from glob import glob
 from spotipy.oauth2 import SpotifyOAuth
 from secrets import token_hex
 

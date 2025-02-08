@@ -1,6 +1,6 @@
 from menu import start
 
-def main():
+def main() -> None:
     start()
 
 if __name__ == "__main__":
