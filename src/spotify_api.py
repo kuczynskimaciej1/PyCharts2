@@ -1,4 +1,4 @@
-from globals import webbrowser, sp_oauth, spotipy, spotify, token_info
+from globals import sp_oauth, spotipy, spotify, token_info
 
 def authenticate_spotify() -> None:
     global token_info, spotify
