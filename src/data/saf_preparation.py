@@ -144,6 +144,3 @@ def add_spotify_info(resume_from_track_id=None) -> None:
 
     print(f"Zakończono! Przetworzono łącznie {processed_tracks} utworów.")
     print("Dane zostały zapisane do pliku new_data.csv.")
-
-
-add_spotify_info()

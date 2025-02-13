@@ -30,6 +30,7 @@ def delete_cols() -> None:
     total.to_csv('../../data/full_training_data.csv')
 
 
+
 def all():
     set_8m: pd.DataFrame = pd.read_csv('../../data/8+ M. Spotify Tracks, Genre, Audio Features/8m_data.csv')
     set_10m: pd.DataFrame = pd.read_csv('../../data/10+ M. Beatport Tracks/10m_data.csv')
