@@ -64,7 +64,7 @@ for start in range(0, total_rows, batch_size):
         'tempo': 'first',
         'time_signature': 'first',
         'valence': 'first',
-        'artist_id': 'first',
+        'artist_id': lambda y: list(y.unique()),
         'artist_name': lambda x: list(x.unique())  # Lista unikalnych nazw artystów
     }).reset_index()
 

@@ -7,10 +7,13 @@ def merge_sets():
     total: pd.DataFrame = pd.concat([set_8m, set_10m], ignore_index = True, axis=0)
     total.to_csv('../../data/full_training_data.csv')
 
+
+
 def drop_duplicates_pandas() -> None:
     total: pd.DataFrame = pd.read_csv('../../data/full_training_data.csv')
     total = total.drop_duplicates(subset=['track_id'], ignore_index=True)
     total.to_csv('../../data/full_training_data.csv')
+
 
 
 def count_unique_values() -> None:
@@ -19,6 +22,9 @@ def count_unique_values() -> None:
     print(total.shape[0])
     print(total['track_id'].nunique())
 
-merge_sets()
-drop_duplicates_pandas()
-count_unique_values()
+
+
+def delete_cols() -> None:
+    total: pd.DataFrame = pd.read_csv('../../data/full_training_data.csv')
+    total = total.drop(columns=['Unnamed: 0.3','Unnamed: 0.2','Unnamed: 0.1','Unnamed: 0'])
+    total.to_csv('../../data/full_training_data.csv')

@@ -54,7 +54,7 @@ total = total.groupby('track_id').agg({
     'explicit': 'first',
     'release_id': 'first',
     'release_title': 'first',
-    'artist_id': 'first',
+    'artist_id': lambda y: list(y.unique()),
     'artist_name': lambda x: list(x.unique())  # Lista unikalnych nazw artystów
 }).reset_index()
 
