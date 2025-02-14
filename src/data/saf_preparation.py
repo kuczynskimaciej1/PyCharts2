@@ -144,3 +144,31 @@ def add_spotify_info(resume_from_track_id=None) -> None:
 
     print(f"Zakończono! Przetworzono łącznie {processed_tracks} utworów.")
     print("Dane zostały zapisane do pliku new_data.csv.")
+
+
+def merge_downloaded_info() -> None:
+    total_saf = pd.read_csv("../../data/Spotify Audio Features/saf_data.csv")
+    new_data = pd.read_csv("../../data/Spotify Audio Features/new_data.csv")
+
+    new_data.rename(columns={'artist_ids': 'artist_id'}, inplace=True)
+    new_data.rename(columns={'album_id': 'release_id'}, inplace=True)
+    new_data.rename(columns={'album_name': 'release_name'}, inplace=True)
+    new_data['artist_id'] = new_data['artist_id'].str.split(',')
+
+    print(new_data.columns)
+    print(new_data.loc[[1]])
+
+    total_saf = pd.merge(total_saf, new_data[['track_id', 'artist_id', 'release_id', 'release_name', 'explicit']], left_on='track_id', right_on='track_id', how='left')
+    total_saf = total_saf[['track_id', 'track_name', 'artist_id', 'artist_name', 'release_id', 'release_name', 'explicit', 
+               'popularity', 'acousticness', 'danceability', 'duration_ms', 'energy',
+               'instrumentalness', 'key', 'liveness', 'loudness', 'mode',
+               'speechiness', 'tempo', 'time_signature', 'valence']]
+
+    print(total_saf.columns)
+    total_saf.to_csv("../../data/Spotify Audio Features/saf_data.csv")
+
+
+
+merge_downloaded_info()
+
+
