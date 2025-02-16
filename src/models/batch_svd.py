@@ -1,4 +1,4 @@
-from tensorflow.python.keras.layers import Input, Dense
+from tensorflow.python.keras.layers import Input, Dense, Embedding, Flatten, Concatenate
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.callbacks import ModelCheckpoint
 import matplotlib.pyplot as plt
@@ -23,21 +23,55 @@ y = data['popularity'] / 100.0  # Normalizacja popularności do zakresu [0, 1]
 # Podział na zbiór treningowy i testowy
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Normalizacja cech liczbowych
+# Normalizacja cech liczbowych (bez kolumn tekstowych)
+numeric_features = X_train.drop(columns=['track_id', 'artist_id', 'release_id'])
 scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_test = scaler.transform(X_test)
+numeric_features_train = scaler.fit_transform(numeric_features)
+numeric_features_test = scaler.transform(X_test.drop(columns=['track_id', 'artist_id', 'release_id']))
 
-# Parametry modelu
-n_features = X_train.shape[1]  # Liczba cech
-latent_dim = 21  # Wymiar ukrytych cech (SVD)
+# Przygotowanie danych dla embeddingów
+track_ids_train = X_train['track_id'].astype('category').cat.codes.values
+artist_ids_train = X_train['artist_id'].astype('category').cat.codes.values
+release_ids_train = X_train['release_id'].astype('category').cat.codes.values
 
-# Budowa modelu SVD
-input_layer = Input(shape=(n_features,), name='input_layer')
-svd_layer = Dense(latent_dim, activation='linear', name='svd_layer')(input_layer)  # Redukcja wymiarowości
-output_layer = Dense(1, activation='sigmoid', name='output_layer')(svd_layer)  # Przewidywanie popularności
+track_ids_test = X_test['track_id'].astype('category').cat.codes.values
+artist_ids_test = X_test['artist_id'].astype('category').cat.codes.values
+release_ids_test = X_test['release_id'].astype('category').cat.codes.values
 
-model_svd = Model(inputs=input_layer, outputs=output_layer)
+# Liczba unikalnych wartości dla każdej kolumny kategorycznej
+n_tracks = len(data['track_id'].unique())
+n_artists = len(data['artist_id'].unique())
+n_releases = len(data['release_id'].unique())
+
+# Wymiar embeddingów
+embedding_dim = 21
+
+# Warstwy wejściowe
+track_input = Input(shape=(1,), name='track_input')
+artist_input = Input(shape=(1,), name='artist_input')
+release_input = Input(shape=(1,), name='release_input')
+numeric_input = Input(shape=(numeric_features_train.shape[1],), name='numeric_input')
+
+# Warstwy embeddingowe
+track_embedding = Embedding(n_tracks, embedding_dim, name='track_embedding')(track_input)
+artist_embedding = Embedding(n_artists, embedding_dim, name='artist_embedding')(artist_input)
+release_embedding = Embedding(n_releases, embedding_dim, name='release_embedding')(release_input)
+
+# Spłaszczenie embeddingów
+track_vec = Flatten()(track_embedding)
+artist_vec = Flatten()(artist_embedding)
+release_vec = Flatten()(release_embedding)
+
+# Połączenie wszystkich cech
+concat = Concatenate()([track_vec, artist_vec, release_vec, numeric_input])
+
+# Warstwy gęste
+dense_1 = Dense(64, activation='relu')(concat)
+dense_2 = Dense(32, activation='relu')(dense_1)
+output_layer = Dense(1, activation='sigmoid')(dense_2)
+
+# Budowa modelu
+model_svd = Model(inputs=[track_input, artist_input, release_input, numeric_input], outputs=output_layer)
 model_svd.compile(optimizer='adam', loss='mse')
 
 # Callback do zapisywania modelu
@@ -45,7 +79,7 @@ checkpoint = ModelCheckpoint('model_svd_best.h5', monitor='val_loss', save_best_
 
 # Trening modelu
 history_svd = model_svd.fit(
-    X_train,
+    [track_ids_train, artist_ids_train, release_ids_train, numeric_features_train],
     y_train,
     epochs=10,
     batch_size=64,
