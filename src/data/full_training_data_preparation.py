@@ -1,5 +1,4 @@
 import pandas as pd
-from pyspark.sql import SparkSession
 
 def merge_sets():
     set_8m: pd.DataFrame = pd.read_csv('../../data/8+ M. Spotify Tracks, Genre, Audio Features/8m_data.csv')
@@ -31,7 +30,7 @@ def delete_cols() -> None:
 
 
 
-def all():
+def all() -> None:
     set_8m: pd.DataFrame = pd.read_csv('../../data/8+ M. Spotify Tracks, Genre, Audio Features/8m_data.csv')
     set_10m: pd.DataFrame = pd.read_csv('../../data/10+ M. Beatport Tracks/10m_data.csv')
     total: pd.DataFrame = pd.concat([set_8m, set_10m], ignore_index = True, axis=0)
@@ -40,3 +39,11 @@ def all():
     print(total['track_id'].nunique())
     print(total.columns)
     total.to_csv('../../data/full_training_data.csv')
+
+
+
+def release_id_null_values() -> None:
+    data = pd.read_csv("../../data/full_training_data.csv")
+    print(data[['track_id', 'artist_id', 'release_id']].isnull().sum())
+    data = data.dropna(subset=['release_id'])
+    data.to_csv('../../data/full_training_data.csv')
