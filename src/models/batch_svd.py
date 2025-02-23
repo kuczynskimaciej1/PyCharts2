@@ -1,96 +1,58 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from tensorflow.python.keras.layers import Input, Dense, Embedding, Flatten, Concatenate
-from tensorflow.python.keras.models import Model
-from tensorflow.python.keras.callbacks import ModelCheckpoint
 from surprise import SVD, Dataset, Reader
-from surprise.model_selection import cross_validate
+from surprise.model_selection import cross_validate, train_test_split
+import pickle
 
 # Wczytanie danych
 data = pd.read_csv("../../data/full_training_data.csv")
 data = data.drop(columns=['Unnamed: 0'])
 data['explicit'] = data['explicit'].astype(int)
 
-# Kodowanie kategorii
-label_encoders = {}
-categorical_columns = ['track_id', 'track_name', 'artist_id', 'artist_name', 'release_id', 'release_name']
-for col in categorical_columns:
-    le = LabelEncoder()
-    data[col] = le.fit_transform(data[col].astype(str))
-    label_encoders[col] = le
-
-# Podział na cechy i target
-X = data.drop(columns=['popularity'])
-y = data['popularity'] / 100.0  # Normalizacja
+# Przygotowanie danych dla biblioteki Surprise
+reader = Reader(rating_scale=(0, 1))  # Popularność jest skalowana w zakresie 0-1
+data_svd = Dataset.load_from_df(data[['track_id', 'artist_id', 'popularity']], reader)
 
 # Podział na zbiór treningowy i testowy
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+trainset, testset = train_test_split(data_svd, test_size=0.2)
 
-# Normalizacja cech liczbowych
-numeric_features = X_train.drop(columns=categorical_columns)
-scaler = StandardScaler()
-numeric_features_train = scaler.fit_transform(numeric_features)
-numeric_features_test = scaler.transform(X_test.drop(columns=categorical_columns))
-
-# Przygotowanie embeddingów
-embeddings = {}
-for col in categorical_columns:
-    embeddings[col] = Embedding(input_dim=len(data[col].unique()), output_dim=10, name=f'{col}_embedding')
-
-# Wejścia do modelu
-inputs = {col: Input(shape=(1,), name=col) for col in categorical_columns}
-numeric_input = Input(shape=(numeric_features_train.shape[1],), name='numeric_input')
-
-# Przetwarzanie embeddingów
-embedded = [Flatten()(embeddings[col](inputs[col])) for col in categorical_columns]
-concat = Concatenate()([*embedded, numeric_input])
-
-# Warstwy gęste
-dense_1 = Dense(64, activation='relu')(concat)
-dense_2 = Dense(32, activation='relu')(dense_1)
-output_layer = Dense(1, activation='sigmoid')(dense_2)
-
-# Model SVD
-reader = Reader(rating_scale=(0, 1))
-data_svd = Dataset.load_from_df(data[['track_id', 'artist_id', 'popularity']], reader)
-trainset = data_svd.build_full_trainset()
+# Trenowanie modelu SVD
 model_svd = SVD()
 model_svd.fit(trainset)
-cross_validate(model_svd, data_svd, cv=5)
-checkpoint = ModelCheckpoint('model_svd_v2_best.h5', monitor='val_loss', save_best_only=True, mode='min')
 
-# Trenowanie modelu
-history = model_svd.fit(
-    [X_train[col] for col in categorical_columns] + [numeric_features_train],
-    y_train,
-    epochs=10,
-    batch_size=64,
-    validation_split=0.2,
-    callbacks=[checkpoint],
-    verbose=1
-)
+# Walidacja krzyżowa
+cv_results = cross_validate(model_svd, data_svd, cv=5, verbose=True)
 
-# Wykres dokładności
-plt.plot(history.history['loss'], label='Train Loss')
-plt.plot(history.history['val_loss'], label='Validation Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('NCF Model Accuracy')
+# Zapis modelu
+with open("svd_model.pkl", "wb") as f:
+    pickle.dump(model_svd, f)
+
+# Wykres błędu RMSE dla każdej walidacji
+plt.plot(range(1, 6), cv_results['test_rmse'], marker='o', label='RMSE')
+plt.xlabel("Fold")
+plt.ylabel("RMSE")
+plt.title("Wyniki walidacji krzyżowej SVD")
 plt.legend()
 plt.show()
 
-# Funkcja rekomendacji
-def generate_playlist(input_tracks, model, data, label_encoders):
-    track_ids = [label_encoders['track_id'].transform([track])[0] for track in input_tracks]
-    pred_scores = model.predict([np.array(track_ids)])
-    sorted_indices = np.argsort(pred_scores.flatten())[::-1]
-    recommended_tracks = data.iloc[sorted_indices[:10]]['track_name'].values
-    return recommended_tracks
+# Funkcja rekomendacji na podstawie podanych utworów
+def generate_playlist(input_tracks, model, data, top_n=10):
+    unique_tracks = data[['track_id', 'track_name']].drop_duplicates()
+    
+    recommendations = []
+    for track in input_tracks:
+        for candidate_track in unique_tracks['track_id'].values:
+            if candidate_track != track:
+                score = model.predict(track, candidate_track).est
+                recommendations.append((candidate_track, score))
+    
+    recommendations.sort(key=lambda x: x[1], reverse=True)
+    recommended_tracks = [track_id for track_id, _ in recommendations[:top_n]]
+    
+    return unique_tracks[unique_tracks['track_id'].isin(recommended_tracks)]['track_name'].values
 
 # Przykładowa playlista
 example_tracks = ['0009Q7nGlWjFzSjQIo9PmK', '000EFWe0HYAaXzwGbEU3rG']
-recommended_playlist = generate_playlist(example_tracks, model_svd, data, label_encoders)
+recommended_playlist = generate_playlist(example_tracks, model_svd, data)
 print("Recommended Playlist:", recommended_playlist)
