@@ -60,7 +60,7 @@ trainset = data_svd.build_full_trainset()
 model_svd = SVD()
 model_svd.fit(trainset)
 cross_validate(model_svd, data_svd, cv=5)
-checkpoint = ModelCheckpoint('model_svd_best.h5', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('model_svd_v2_best.h5', monitor='val_loss', save_best_only=True, mode='min')
 
 # Trenowanie modelu
 history = model_svd.fit(
