@@ -3,9 +3,9 @@ from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.callbacks import ModelCheckpoint
 import matplotlib.pyplot as plt
 import pandas as pd
+import pickle
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-
 from tensorflow.python.keras.engine import data_adapter
 
 def _is_distributed_dataset(ds):
@@ -82,7 +82,7 @@ model_svd = Model(inputs=[track_input, artist_input, release_input, numeric_inpu
 model_svd.compile(optimizer='adam', loss='mse')
 
 # Callback do zapisywania modelu
-checkpoint = ModelCheckpoint('model_regression_best.h5', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('model_regression_best.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min')
 
 # Trening modelu
 history_svd = model_svd.fit(
@@ -94,6 +94,9 @@ history_svd = model_svd.fit(
     callbacks=[checkpoint],
     verbose=1
 )
+
+with open('/batch_regression_history', 'wb') as file_pi:
+    pickle.dump(history_svd.history, file_pi)
 
 # Wykres dokładności
 plt.plot(history_svd.history['loss'], label='Train Loss')
