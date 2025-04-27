@@ -63,7 +63,7 @@ plt.xlabel("Fold")
 plt.ylabel("RMSE")
 plt.title("Wyniki walidacji krzyżowej SVD (wszystkie cechy)")
 plt.legend()
-plt.show()
+plt.savefig('svd.png')
 
 # Funkcja rekomendacji na podstawie podanych utworów
 def generate_playlist(input_tracks, model, data, label_encoders, top_n=10):

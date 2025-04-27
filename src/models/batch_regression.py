@@ -82,7 +82,7 @@ model_svd = Model(inputs=[track_input, artist_input, release_input, numeric_inpu
 model_svd.compile(optimizer='adam', loss='mse')
 
 # Callback do zapisywania modelu
-checkpoint = ModelCheckpoint('model_svd_best.h5', monitor='val_loss', save_best_only=True, mode='min')
+checkpoint = ModelCheckpoint('model_regression_best.h5', monitor='val_loss', save_best_only=True, mode='min')
 
 # Trening modelu
 history_svd = model_svd.fit(
@@ -100,6 +100,6 @@ plt.plot(history_svd.history['loss'], label='Train Loss')
 plt.plot(history_svd.history['val_loss'], label='Validation Loss')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
-plt.title('SVD Model Accuracy')
+plt.title('Regression Model Accuracy')
 plt.legend()
-plt.show()
+plt.savefig('regression.png')
