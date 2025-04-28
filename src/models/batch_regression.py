@@ -16,24 +16,28 @@ def _is_distributed_dataset(ds):
 data_adapter._is_distributed_dataset = _is_distributed_dataset
 
 # Wczytanie danych
-data = pd.read_csv("../../data/full_training_data.csv")
+data = pd.read_csv("../../data/shortened_data.csv")
 data = data.drop(columns=['track_name', 'artist_name', 'release_name'])
 data['explicit'] = data['explicit'].astype(int)
+print("Wczytanie danych")
 
 # Przygotowanie danych
 artist_ids = data['artist_id'].astype('category').cat.codes.values
 track_ids = data['track_id'].astype('category').cat.codes.values
 release_ids = data['release_id'].astype('category').cat.codes.values
+print("Przygotowanie danych")
 
 # Create mappings between original IDs and encoded IDs
 track_id_map = dict(zip(data['track_id'], track_ids))
 artist_id_map = dict(zip(data['artist_id'], artist_ids))
 release_id_map = dict(zip(data['release_id'], release_ids))
+print("Create mappings between original IDs and encoded IDs")
 
 # Liczba unikalnych wartości dla każdej kolumny kategorycznej
 n_tracks = len(data['track_id'].unique())
 n_artists = len(data['artist_id'].unique())
 n_releases = len(data['release_id'].unique())
+print("Liczba unikalnych wartości dla każdej kolumny kategorycznej")
 
 # Wymiar embeddingów
 embedding_dim = 21
@@ -42,15 +46,18 @@ embedding_dim = 21
 # Here we'll treat artists as "users" and tracks as "items"
 positive_pairs = data[['artist_id', 'track_id']].drop_duplicates()
 positive_pairs['rating'] = 1  # Positive interaction
+print("Create positive pairs (user-item interactions)")
 
 # Create negative pairs (negative sampling)
 np.random.seed(42)
 negative_samples = []
 artist_track_map = defaultdict(set)
+print("Create negative pairs (negative sampling)")
 
 # Create a map of artist to their tracks
 for _, row in positive_pairs.iterrows():
     artist_track_map[row['artist_id']].add(row['track_id'])
+print("Create a map of artist to their tracks")
 
 # Generate negative samples
 for artist in artist_track_map:
@@ -65,6 +72,7 @@ for artist in artist_track_map:
             negative_samples.append({'artist_id': artist, 'track_id': track, 'rating': 0})
 
 negative_pairs = pd.DataFrame(negative_samples)
+print("Generate negative samples")
 
 # Combine positive and negative pairs
 all_pairs = pd.concat([positive_pairs, negative_pairs])
@@ -72,6 +80,7 @@ all_pairs = pd.concat([positive_pairs, negative_pairs])
 # Add numerical features for each track
 track_features = data.drop(columns=['artist_id', 'release_id', 'popularity']).drop_duplicates('track_id')
 all_pairs = all_pairs.merge(track_features, on='track_id')
+print("Add numerical features for each track")
 
 # Prepare data for model
 X = all_pairs.drop(columns=['rating'])
@@ -88,12 +97,14 @@ release_ids_train = X_train['release_id'].map(release_id_map).values
 artist_ids_test = X_test['artist_id'].map(artist_id_map).values
 track_ids_test = X_test['track_id'].map(track_id_map).values
 release_ids_test = X_test['release_id'].map(release_id_map).values
+print("Prepare categorical features")
 
 # Normalize numerical features
 numeric_features = X_train.drop(columns=['artist_id', 'track_id', 'release_id'])
 scaler = StandardScaler()
 numeric_features_train = scaler.fit_transform(numeric_features)
 numeric_features_test = scaler.transform(X_test.drop(columns=['artist_id', 'track_id', 'release_id']))
+print("Normalize numerical features")
 
 # Warstwy wejściowe
 artist_input = Input(shape=(1,), name='artist_input')
@@ -110,9 +121,11 @@ release_embedding = Embedding(n_releases, embedding_dim, name='release_embedding
 artist_vec = Flatten()(artist_embedding)
 track_vec = Flatten()(track_embedding)
 release_vec = Flatten()(release_embedding)
+print("Spłaszczenie embeddingów")
 
 # Połączenie wszystkich cech
 concat = Concatenate()([artist_vec, track_vec, release_vec, numeric_input])
+print("Spłaszczenie embeddingów")
 
 # Warstwy gęste
 dense_1 = Dense(64, activation='relu')(concat)
@@ -141,6 +154,7 @@ history = model.fit(
 # Save history
 with open('recommender_history.pkl', 'wb') as file_pi:
     pickle.dump(history.history, file_pi)
+print("Save history")
 
 # Wykres dokładności
 plt.plot(history.history['loss'], label='Train Loss')
