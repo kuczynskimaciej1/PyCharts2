@@ -202,18 +202,21 @@ def recommend_tracks(artist_id, top_n=10):
     track_ids = np.array([track_id_map[t] for t in all_tracks['track_id']])
     release_ids = np.array([release_id_map[r] for r in all_tracks['release_id']])
     
-    # Get numeric features for these tracks
-    numeric_features = all_tracks.merge(track_features, on='track_id')
+    # Get numeric features for these tracks - ensure same columns as training
+    numeric_features = all_tracks.merge(
+        track_features[numeric_cols],  # Only use the columns that were used in training
+        on='track_id',
+        how='left'
+    )
     
-    # Remove the ID columns before scaling
-    cols_to_drop = ['track_id', 'release_id_x', 'release_id_y']  # Include both possible release_id columns
-    cols_to_drop = [col for col in cols_to_drop if col in numeric_features.columns]
-    numeric_features = numeric_features.drop(columns=cols_to_drop)
+    # Ensure we have the exact same columns in the same order as during training
+    numeric_features = numeric_features[numeric_cols]
     
-    numeric_features = scaler.transform(numeric_features)
+    # Scale the features
+    numeric_features_scaled = scaler.transform(numeric_features)
     
     # Predict probabilities
-    predictions = model.predict([artist_ids, track_ids, release_ids, numeric_features])
+    predictions = model.predict([artist_ids, track_ids, release_ids, numeric_features_scaled])
     
     # Get top recommendations
     all_tracks['score'] = predictions
