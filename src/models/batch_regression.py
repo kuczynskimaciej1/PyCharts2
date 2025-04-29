@@ -15,79 +15,107 @@ def _is_distributed_dataset(ds):
 
 data_adapter._is_distributed_dataset = _is_distributed_dataset
 
-# Wczytanie danych
+# Load data
 data = pd.read_csv("../../data/shortened_data.csv")
 data = data.drop(columns=['track_name', 'artist_name', 'release_name'])
 data['explicit'] = data['explicit'].astype(int)
-print("Wczytanie danych")
+print("Data loaded")
 
-# Przygotowanie danych
+# Prepare data
 artist_ids = data['artist_id'].astype('category').cat.codes.values
 track_ids = data['track_id'].astype('category').cat.codes.values
 release_ids = data['release_id'].astype('category').cat.codes.values
-print("Przygotowanie danych")
+print("Data prepared")
 
 # Create mappings between original IDs and encoded IDs
 track_id_map = dict(zip(data['track_id'], track_ids))
 artist_id_map = dict(zip(data['artist_id'], artist_ids))
 release_id_map = dict(zip(data['release_id'], release_ids))
-print("Create mappings between original IDs and encoded IDs")
+print("Mappings created")
 
-# Liczba unikalnych wartości dla każdej kolumny kategorycznej
+# Number of unique values for each categorical column
 n_tracks = len(data['track_id'].unique())
 n_artists = len(data['artist_id'].unique())
 n_releases = len(data['release_id'].unique())
-print("Liczba unikalnych wartości dla każdej kolumny kategorycznej")
+print(f"Unique values - Tracks: {n_tracks}, Artists: {n_artists}, Releases: {n_releases}")
 
-# Wymiar embeddingów
+# Embedding dimension
 embedding_dim = 21
 
-# Create positive pairs (user-item interactions)
-# Here we'll treat artists as "users" and tracks as "items"
-positive_pairs = data[['artist_id', 'track_id']].drop_duplicates()
+# Create positive pairs (artist-track interactions)
+positive_pairs = data[['artist_id', 'track_id', 'release_id']].drop_duplicates()
 positive_pairs['rating'] = 1  # Positive interaction
-print("Create positive pairs (user-item interactions)")
+print("Positive pairs created")
 
 # Create negative pairs (negative sampling)
 np.random.seed(42)
 negative_samples = []
 artist_track_map = defaultdict(set)
-print("Create negative pairs (negative sampling)")
 
-# Create a map of artist to their tracks
-for _, row in positive_pairs.iterrows():
-    artist_track_map[row['artist_id']].add(row['track_id'])
-print("Create a map of artist to their tracks")
+# Create a map of artist to their tracks and releases
+for _, row in data.iterrows():
+    artist_track_map[(row['artist_id'], row['track_id'])] = row['release_id']
+print("Artist-track-release map created")
 
 # Generate negative samples
-for artist in artist_track_map:
-    artist_tracks = artist_track_map[artist]
-    all_tracks = set(data['track_id'].unique())
-    negative_tracks = list(all_tracks - artist_tracks)
+all_tracks = data[['track_id', 'release_id']].drop_duplicates()
+all_tracks_list = all_tracks.to_dict('records')
+
+for artist in data['artist_id'].unique():
+    # Get artist's actual tracks
+    artist_tracks = [k[1] for k in artist_track_map.keys() if k[0] == artist]
     
-    # Sample as many negative tracks as positive ones
-    if negative_tracks:
-        sampled_negatives = np.random.choice(negative_tracks, size=min(len(artist_tracks), len(negative_tracks)), replace=False)
-        for track in sampled_negatives:
-            negative_samples.append({'artist_id': artist, 'track_id': track, 'rating': 0})
+    # Sample negative tracks
+    possible_negatives = [t for t in all_tracks_list if t['track_id'] not in artist_tracks]
+    
+    if possible_negatives:
+        sampled_negatives = np.random.choice(
+            possible_negatives, 
+            size=min(len(artist_tracks), len(possible_negatives)), 
+            replace=False
+        )
+        
+        for neg in sampled_negatives:
+            negative_samples.append({
+                'artist_id': artist,
+                'track_id': neg['track_id'],
+                'release_id': neg['release_id'],
+                'rating': 0
+            })
 
 negative_pairs = pd.DataFrame(negative_samples)
-print("Generate negative samples")
+print("Negative samples generated")
 
 # Combine positive and negative pairs
 all_pairs = pd.concat([positive_pairs, negative_pairs])
+print(f"Total pairs: {len(all_pairs)} (Positive: {len(positive_pairs)}, Negative: {len(negative_pairs)})")
 
 # Add numerical features for each track
-track_features = data.drop(columns=['artist_id', 'release_id', 'popularity']).drop_duplicates('track_id')
-all_pairs = all_pairs.merge(track_features, on='track_id')
-print("Add numerical features for each track")
+# First ensure we keep release_id in track_features
+track_features = data.drop(columns=['artist_id', 'popularity']).drop_duplicates('track_id')
+print("Track features prepared")
+
+# Verify release_id exists before merging
+assert 'release_id' in track_features.columns, "release_id missing from track_features"
+
+# Merge with all_pairs
+all_pairs = all_pairs.merge(
+    track_features.drop(columns=['release_id']),  # We already have release_id from the pairs
+    on='track_id',
+    how='left'
+)
+print("Numerical features added")
 
 # Prepare data for model
 X = all_pairs.drop(columns=['rating'])
 y = all_pairs['rating']
 
+# Verify release_id exists before splitting
+assert 'release_id' in X.columns, "release_id missing before train-test split"
+
 # Split into train and test
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+print("Data split into train and test")
 
 # Prepare categorical features
 artist_ids_train = X_train['artist_id'].map(artist_id_map).values
@@ -97,14 +125,14 @@ release_ids_train = X_train['release_id'].map(release_id_map).values
 artist_ids_test = X_test['artist_id'].map(artist_id_map).values
 track_ids_test = X_test['track_id'].map(track_id_map).values
 release_ids_test = X_test['release_id'].map(release_id_map).values
-print("Prepare categorical features")
+print("Categorical features prepared")
 
 # Normalize numerical features
-numeric_features = X_train.drop(columns=['artist_id', 'track_id', 'release_id'])
+numeric_cols = X_train.columns.difference(['artist_id', 'track_id', 'release_id'])
 scaler = StandardScaler()
-numeric_features_train = scaler.fit_transform(numeric_features)
-numeric_features_test = scaler.transform(X_test.drop(columns=['artist_id', 'track_id', 'release_id']))
-print("Normalize numerical features")
+numeric_features_train = scaler.fit_transform(X_train[numeric_cols])
+numeric_features_test = scaler.transform(X_test[numeric_cols])
+print("Numerical features normalized")
 
 # Warstwy wejściowe
 artist_input = Input(shape=(1,), name='artist_input')
@@ -125,7 +153,6 @@ print("Spłaszczenie embeddingów")
 
 # Połączenie wszystkich cech
 concat = Concatenate()([artist_vec, track_vec, release_vec, numeric_input])
-print("Spłaszczenie embeddingów")
 
 # Warstwy gęste
 dense_1 = Dense(64, activation='relu')(concat)
