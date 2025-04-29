@@ -203,8 +203,8 @@ def recommend_tracks(artist_id, top_n=10):
     track_ids = np.array([track_id_map[t] for t in all_tracks['track_id']])
     release_ids = np.array([release_id_map[r] for r in all_tracks['release_id']])
     
-    # Get numerical features for all tracks
-    numeric_features = all_tracks.merge(track_features, on='track_id')
+    # Merge, but don't introduce extra 'release_id' columns
+    numeric_features = all_tracks.merge(track_features.drop(columns=['release_id']), on='track_id')
     numeric_features = numeric_features.drop(columns=['track_id', 'release_id'])
     numeric_features = scaler.transform(numeric_features)
     
