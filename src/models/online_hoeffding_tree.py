@@ -221,7 +221,7 @@ data = recommender.preprocess_data("../../data/full_training_data.csv", sample_s
 recommender.initialize_model()
 
 # Step 3: Simulate and train on data stream
-recommender.simulate_data_stream(data, stream_size=3000, batch_size=100)
+recommender.simulate_data_stream(data, stream_size=2000, batch_size=100)
 
 # Step 4: Get recommendations for an artist
 example_artist = data['artist_id'].iloc[0]
