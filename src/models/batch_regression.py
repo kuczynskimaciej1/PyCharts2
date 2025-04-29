@@ -192,7 +192,6 @@ plt.title('Recommender Model Training')
 plt.legend()
 plt.savefig('recommender_training.png')
 
-# Recommendation function
 def recommend_tracks(artist_id, top_n=10):
     """Recommend tracks for a given artist"""
     # Get all unique tracks
@@ -203,9 +202,14 @@ def recommend_tracks(artist_id, top_n=10):
     track_ids = np.array([track_id_map[t] for t in all_tracks['track_id']])
     release_ids = np.array([release_id_map[r] for r in all_tracks['release_id']])
     
-    # Merge, but don't introduce extra 'release_id' columns
-    numeric_features = all_tracks.merge(track_features.drop(columns=['release_id']), on='track_id')
-    numeric_features = numeric_features.drop(columns=['track_id', 'release_id'])
+    # Get numeric features for these tracks
+    numeric_features = all_tracks.merge(track_features, on='track_id')
+    
+    # Remove the ID columns before scaling
+    cols_to_drop = ['track_id', 'release_id_x', 'release_id_y']  # Include both possible release_id columns
+    cols_to_drop = [col for col in cols_to_drop if col in numeric_features.columns]
+    numeric_features = numeric_features.drop(columns=cols_to_drop)
+    
     numeric_features = scaler.transform(numeric_features)
     
     # Predict probabilities
