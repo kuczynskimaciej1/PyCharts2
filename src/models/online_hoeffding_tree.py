@@ -194,73 +194,81 @@ class EnhancedMusicRecommender:
         self.logger.info(f"Split Confidence: {self.best_hyperparams['split_confidence']:.2e} (Prevents over-splitting)")
         self.logger.info(f"Tie Threshold: {self.best_hyperparams['tie_threshold']:.3f} (Controls node splitting)")
     
-    def preprocess_data(self, file_path, sample_size=10000):
-        """Enhanced preprocessing with genre clustering and feature engineering"""
-        self.logger.info("Loading and preprocessing data with hierarchical clustering...")
-        data = pd.read_csv(file_path)
+def preprocess_data(self, file_path, sample_size=10000):
+    """Enhanced preprocessing with genre clustering and feature engineering"""
+    self.logger.info("Loading and preprocessing data with hierarchical clustering...")
+    data = pd.read_csv(file_path)
+    
+    # Check if 'interaction' column exists, if not create it
+    if 'interaction' not in data.columns:
+        self.logger.info("'interaction' column not found - creating positive interactions")
+        data['interaction'] = 1  # Assume all existing records are positive interactions
+    
+    # Create genre proxy from artist_id (since genre isn't in the dataset)
+    data['genre'] = data['artist_id'].apply(lambda x: hash(x) % 5)  # Simulate 5 genres
+    
+    # Feature selection strategy
+    feature_strategy = self._get_feature_strategy(strategy='content')
+    cols_to_keep = feature_strategy + ['artist_id', 'track_id', 'genre', 'interaction']
+    
+    # Only keep columns that actually exist in the data
+    cols_to_keep = [col for col in cols_to_keep if col in data.columns]
+    data = data[cols_to_keep]
+    
+    # Rest of the preprocessing remains the same...
+    positive_pairs = data[['artist_id', 'track_id', 'genre']].drop_duplicates()
+    positive_pairs['interaction'] = 1
+    
+    # Create artist-track-genre map
+    for _, row in positive_pairs.iterrows():
+        self.artist_track_map[row['artist_id']].add(row['track_id'])
+        self.genre_map[row['artist_id']] = row['genre']
+    
+    # Generate negative samples
+    negative_samples = []
+    all_tracks = set(data['track_id'].unique())
+    
+    for artist in self.artist_track_map:
+        artist_tracks = self.artist_track_map[artist]
+        negative_tracks = list(all_tracks - artist_tracks)
         
-        # Create genre proxy from artist_id (since genre isn't in the dataset)
-        data['genre'] = data['artist_id'].apply(lambda x: hash(x) % 5)  # Simulate 5 genres
-        
-        # Feature selection strategy
-        feature_strategy = self._get_feature_strategy(strategy='content')
-        cols_to_keep = feature_strategy + ['artist_id', 'track_id', 'genre', 'interaction']
-        data = data[cols_to_keep]
-        
-        # Create positive interactions
-        positive_pairs = data[['artist_id', 'track_id', 'genre']].drop_duplicates()
-        positive_pairs['interaction'] = 1
-        
-        # Create artist-track-genre map
-        for _, row in positive_pairs.iterrows():
-            self.artist_track_map[row['artist_id']].add(row['track_id'])
-            self.genre_map[row['artist_id']] = row['genre']
-        
-        # Generate negative samples
-        negative_samples = []
-        all_tracks = set(data['track_id'].unique())
-        
-        for artist in self.artist_track_map:
-            artist_tracks = self.artist_track_map[artist]
-            negative_tracks = list(all_tracks - artist_tracks)
-            
-            if negative_tracks:
-                sampled_negatives = np.random.choice(
-                    negative_tracks, 
-                    size=min(len(artist_tracks), len(negative_tracks)), 
-                    replace=False
-                )
-                for track in sampled_negatives:
-                    negative_samples.append({
-                        'artist_id': artist,
-                        'track_id': track,
-                        'genre': self.genre_map[artist],
-                        'interaction': 0
-                    })
-        
-        negative_pairs = pd.DataFrame(negative_samples)
-        all_pairs = pd.concat([positive_pairs, negative_pairs])
-        
-        # Add track features
-        self.track_features = data.drop(columns=['artist_id', 'interaction']).drop_duplicates('track_id')
-        all_pairs = all_pairs.merge(self.track_features, on='track_id')
-        
-        # Hierarchical clustering
-        self._apply_hierarchical_clustering(all_pairs)
-        
-        # Encode categorical features
-        self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
-        self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
-        
-        # Create mappings
-        self.track_id_map = dict(zip(all_pairs['track_id'], all_pairs['track_id'].astype('category').cat.codes))
-        self.artist_id_map = dict(zip(all_pairs['artist_id'], all_pairs['artist_id'].astype('category').cat.codes))
-        
-        # Scale numerical features
-        numeric_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'genre', 'interaction', 'cluster']]
-        all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
-        
-        return all_pairs
+        if negative_tracks:
+            sampled_negatives = np.random.choice(
+                negative_tracks, 
+                size=min(len(artist_tracks), len(negative_tracks)), 
+                replace=False
+            )
+            for track in sampled_negatives:
+                negative_samples.append({
+                    'artist_id': artist,
+                    'track_id': track,
+                    'genre': self.genre_map[artist],
+                    'interaction': 0
+                })
+    
+    negative_pairs = pd.DataFrame(negative_samples)
+    all_pairs = pd.concat([positive_pairs, negative_pairs])
+    
+    # Add track features
+    self.track_features = data.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
+    all_pairs = all_pairs.merge(self.track_features, on='track_id')
+    
+    # Hierarchical clustering
+    self._apply_hierarchical_clustering(all_pairs)
+    
+    # Encode categorical features
+    self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
+    self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
+    
+    # Create mappings
+    self.track_id_map = dict(zip(all_pairs['track_id'], all_pairs['track_id'].astype('category').cat.codes))
+    self.artist_id_map = dict(zip(all_pairs['artist_id'], all_pairs['artist_id'].astype('category').cat.codes))
+    
+    # Scale numerical features
+    numeric_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'genre', 'interaction', 'cluster']]
+    all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
+    
+    return all_pairs
     
     def _get_feature_strategy(self, strategy='content'):
         """Functional feature selection strategy"""
