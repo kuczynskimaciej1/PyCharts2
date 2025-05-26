@@ -581,7 +581,7 @@ if __name__ == "__main__":
     
     try:
         # Step 1: Preprocess data with hierarchical clustering
-        data = recommender.preprocess_data("your_dataset.csv", sample_size=5000)
+        data = recommender.preprocess_data("../../data/full_training_data.csv", sample_size=5000)
         
         # Step 2: Hyperparameter tuning
         recommender.logger.info("\nStarting hyperparameter tuning...")
