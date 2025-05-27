@@ -201,32 +201,45 @@ class EnhancedMusicRecommender:
         
         # Check if 'interaction' column exists, if not create it
         if 'interaction' not in data.columns:
-            self.logger.info("'interaction' column not found - creating positive interactions")
+            self.logger.info("'Interaction' column not found - creating positive interactions")
             data['interaction'] = 1  # Assume all existing records are positive interactions
+            self.logger.info("'Interaction' column created")
+
         
         # Create genre proxy from artist_id (since genre isn't in the dataset)
         data['genre'] = data['artist_id'].apply(lambda x: hash(x) % 5)  # Simulate 5 genres
+        self.logger.info("'Genre' column created")
         
         # Feature selection strategy
         feature_strategy = self._get_feature_strategy(strategy='content')
+        self.logger.info("Feature strategy chosen as content")
         cols_to_keep = feature_strategy + ['artist_id', 'track_id', 'genre', 'interaction']
+        self.logger.info("Columns to keep chosen")
         
         # Only keep columns that actually exist in the data
         cols_to_keep = [col for col in cols_to_keep if col in data.columns]
         data = data[cols_to_keep]
-        
+        self.logger.info("Columns to keep filtered")
+
         # Rest of the preprocessing remains the same...
         positive_pairs = data[['artist_id', 'track_id', 'genre']].drop_duplicates()
+        self.logger.info("Duplicates deleted")
         positive_pairs['interaction'] = 1
         
         # Create artist-track-genre map
+        debug_counter = 0
         for _, row in positive_pairs.iterrows():
             self.artist_track_map[row['artist_id']].add(row['track_id'])
             self.genre_map[row['artist_id']] = row['genre']
+            self.logger.info(f"Creating map: {debug_counter}")
+            debug_counter += 1
+        self.logger.info(f"Creating map finished")
         
         # Generate negative samples
         negative_samples = []
         all_tracks = set(data['track_id'].unique())
+        self.logger.info(f"Generating negative samples - setting track_id unique")
+
         
         for artist in self.artist_track_map:
             artist_tracks = self.artist_track_map[artist]
@@ -245,28 +258,37 @@ class EnhancedMusicRecommender:
                         'genre': self.genre_map[artist],
                         'interaction': 0
                     })
+            self.logger.info(f"Generating negative samples - artist done")
+
         
         negative_pairs = pd.DataFrame(negative_samples)
         all_pairs = pd.concat([positive_pairs, negative_pairs])
-        
+        self.logger.info(f"All pairs concatenated")
+
         # Add track features
         self.track_features = data.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
         all_pairs = all_pairs.merge(self.track_features, on='track_id')
-        
+        self.logger.info(f"Added track features")
+
         # Hierarchical clustering
         self._apply_hierarchical_clustering(all_pairs)
+        self.logger.info(f"Applied hierarchical clustering")
         
         # Encode categorical features
         self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
+        self.logger.info(f"Encoded labels for artist")
         self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
+        self.logger.info(f"Encoded labels for track")
         
         # Create mappings
         self.track_id_map = dict(zip(all_pairs['track_id'], all_pairs['track_id'].astype('category').cat.codes))
         self.artist_id_map = dict(zip(all_pairs['artist_id'], all_pairs['artist_id'].astype('category').cat.codes))
+        self.logger.info(f"Created mappings")
         
         # Scale numerical features
         numeric_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'genre', 'interaction', 'cluster']]
         all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
+        self.logger.info(f"Numerical features scaled")
         
         return all_pairs
     
