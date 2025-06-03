@@ -1,0 +1,28 @@
+2025-05-29 18:24:13,975 - svd_rec_experiment1 - INFO - Loading and preprocessing data with hierarchical clustering...
+2025-05-29 18:24:14,088 - svd_rec_experiment1 - INFO - 'Interaction' column not found - creating positive interactions
+2025-05-29 18:24:14,088 - svd_rec_experiment1 - INFO - 'Interaction' column created
+2025-05-29 18:24:14,088 - svd_rec_experiment1 - INFO - 'Genre' column created
+2025-05-29 18:24:14,088 - svd_rec_experiment1 - INFO - Feature strategy chosen as content
+2025-05-29 18:24:14,088 - svd_rec_experiment1 - INFO - Columns to keep chosen
+2025-05-29 18:24:14,104 - svd_rec_experiment1 - INFO - Columns to keep filtered
+2025-05-29 18:24:14,113 - svd_rec_experiment1 - INFO - Duplicates deleted
+2025-05-29 18:24:14,750 - svd_rec_experiment1 - INFO - Artist-track-genre map created
+2025-05-29 18:24:14,750 - svd_rec_experiment1 - INFO - Generating negative samples...
+2025-05-29 18:24:36,317 - svd_rec_experiment1 - INFO - Created 9999 negative samples
+2025-05-29 18:24:36,317 - svd_rec_experiment1 - INFO - Total pairs: 19998
+2025-05-29 18:24:36,337 - svd_rec_experiment1 - INFO - Added track features
+2025-05-29 18:25:10,459 - svd_rec_experiment1 - INFO - Saved visualization: outputs/svd_rec_experiment1/plots/hierarchical_clustering_20250529_182504.png
+2025-05-29 18:25:10,459 - svd_rec_experiment1 - ERROR - Experiment failed: close() argument must be a Figure, an int, a string, or None, not <class 'seaborn.axisgrid.PairGrid'>
+Traceback (most recent call last):
+  File "D:\Dokumenty\Dokumenty\Studia\Politechnika Czêstochowska\Przedmioty\Informatyka\Praca magisterska\PyCharts2\src\models\batch_svd\batch_svd.py", line 544, in <module>
+    data = recommender.preprocess_data("../../../data/ten_thousand.csv", sample_size=1000)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Dokumenty\Dokumenty\Studia\Politechnika Czêstochowska\Przedmioty\Informatyka\Praca magisterska\PyCharts2\src\models\batch_svd\batch_svd.py", line 314, in preprocess_data
+    self._apply_hierarchical_clustering(all_pairs)
+  File "D:\Dokumenty\Dokumenty\Studia\Politechnika Czêstochowska\Przedmioty\Informatyka\Praca magisterska\PyCharts2\src\models\batch_svd\batch_svd.py", line 355, in _apply_hierarchical_clustering
+    self._save_visualization(grid, "hierarchical_clustering")
+  File "D:\Dokumenty\Dokumenty\Studia\Politechnika Czêstochowska\Przedmioty\Informatyka\Praca magisterska\PyCharts2\src\models\batch_svd\batch_svd.py", line 79, in _save_visualization
+    plt.close(fig)
+  File "C:\Users\kuczy\AppData\Local\Programs\Python\Python312\Lib\site-packages\matplotlib\pyplot.py", line 1194, in close
+    raise TypeError("close() argument must be a Figure, an int, a string, "
+TypeError: close() argument must be a Figure, an int, a string, or None, not <class 'seaborn.axisgrid.PairGrid'>

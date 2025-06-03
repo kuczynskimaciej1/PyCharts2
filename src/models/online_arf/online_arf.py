@@ -1,6 +1,7 @@
 from river import ensemble, metrics, evaluate, preprocessing
 from river.tree import HoeffdingTreeClassifier
 from river.drift import ADWIN
+from river.forest import ARFClassifier
 from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
 import numpy as np
 import pandas as pd
@@ -262,8 +263,8 @@ class ARFMusicRecommender:
     def initialize_model(self, hyperparams=None):
         """Initialize ARF model with optional hyperparameters"""
         if hyperparams:
-            self.model = ensemble.AdaptiveRandomForestClassifier(
-                n_models=hyperparams['n_models'],
+            self.model = ARFClassifier(
+                n_models=int(hyperparams['n_models']),
                 max_features=hyperparams['max_features'],
                 lambda_value=hyperparams['lambda_value'],
                 drift_detector=hyperparams['drift_detector'],
@@ -273,7 +274,7 @@ class ARFMusicRecommender:
             self.best_hyperparams = hyperparams
         else:
             # Default parameters
-            self.model = ensemble.AdaptiveRandomForestClassifier(
+            self.model = ARFClassifier(
                 n_models=10,
                 max_features='sqrt',
                 lambda_value=6,
@@ -284,7 +285,7 @@ class ARFMusicRecommender:
     
     def tune_hyperparameters(self, data, max_evals=30):
         """Hyperparameter tuning for ARF with Hyperopt"""
-        from river.drift import ADWIN  # Importujemy detektor dryfu
+        from river.drift import ADWIN
         
         X = data.drop(columns=['interaction'])
         y = data['interaction']
@@ -292,23 +293,30 @@ class ARFMusicRecommender:
         
         space = {
             'n_models': hp.quniform('n_models', 5, 30, 5),
-            'max_features': hp.choice('max_features', ['sqrt', 'log2', 0.5, 0.8]),
+            'max_features': hp.choice('max_features', ['sqrt', 'log2', 0.33, 0.66]),  # Zmienione możliwe wartości
             'lambda_value': hp.uniform('lambda_value', 1, 10),
-            'drift_detector': hp.choice('drift_detector', [None, ADWIN()]),  # Używamy ADWIN zamiast DriftDetector
-            'warning_detector': hp.choice('warning_detector', [None, ADWIN()])
+            'use_drift_detector': hp.choice('use_drift_detector', [False, True]),
         }
         
         def objective(params):
-            model = ensemble.AdaptiveRandomForestClassifier(
+            # Konwersja max_features jeśli jest liczbą
+            max_features = params['max_features']
+            if isinstance(max_features, (int, float)) and max_features <= 1:
+                max_features = float(max_features)  # Upewniamy się, że to float dla wartości ułamkowych
+                
+            drift_detector = ADWIN() if params['use_drift_detector'] else None
+            warning_detector = ADWIN() if params['use_drift_detector'] else None
+            
+            model = ARFClassifier(
                 n_models=int(params['n_models']),
-                max_features=params['max_features'],
+                max_features=max_features,  # Używamy przekonwertowanej wartości
                 lambda_value=params['lambda_value'],
-                drift_detector=params['drift_detector'],
-                warning_detector=params['warning_detector'],
+                drift_detector=drift_detector,
+                warning_detector=warning_detector,
                 metric=metrics.Accuracy()
             )
             
-            # K-Fold Cross Validation
+            # Reszta funkcji pozostaje bez zmian
             kf = KFold(n_splits=3, shuffle=True)
             scores = []
             
@@ -325,11 +333,9 @@ class ARFMusicRecommender:
                     for x, y in zip(X_val.values, y_val.values)
                 ]
                 
-                # Train
                 for xi, yi in train_data:
                     model.learn_one(xi, yi)
                 
-                # Evaluate
                 correct = 0
                 for xi, yi in val_data:
                     y_pred = model.predict_one(xi)
@@ -343,13 +349,17 @@ class ARFMusicRecommender:
         trials = Trials()
         best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=max_evals, trials=trials)
         
-        # Initialize model with best params
+        # Konwersja max_features z indeksu na rzeczywistą wartość
+        max_features_options = ['sqrt', 'log2', 0.33, 0.66]
+        best_max_features = max_features_options[best['max_features']] if isinstance(best['max_features'], int) else best['max_features']
+        
+        use_detector = best['use_drift_detector']
         self.initialize_model({
             'n_models': int(best['n_models']),
-            'max_features': best['max_features'],
+            'max_features': best_max_features,  # Używamy przekonwertowanej wartości
             'lambda_value': best['lambda_value'],
-            'drift_detector': best['drift_detector'],
-            'warning_detector': best['warning_detector']
+            'drift_detector': ADWIN() if use_detector else None,
+            'warning_detector': ADWIN() if use_detector else None
         })
         
         return best
