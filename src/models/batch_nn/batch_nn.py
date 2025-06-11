@@ -1,5 +1,6 @@
 from surprise import Dataset, Reader, accuracy
-from surprise.model_selection import train_test_split
+#from surprise.model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -20,16 +21,16 @@ from datetime import datetime
 import warnings
 import logging
 import tensorflow as tf
-from tensorflow.python.keras.models import Model
-from tensorflow.python.keras.layers import (Input, Embedding, Flatten, Dense, 
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (Input, Embedding, Flatten, Dense, 
                                     Concatenate, Dropout, BatchNormalization,
                                     LeakyReLU)
-from tensorflow.python.keras.regularizers import l2
-from tensorflow.python.keras.optimizers import Adam
-from tensorflow.python.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.python.keras.utils import plot_model
-from tensorflow.python.keras.metrics import AUC, Precision, Recall
-from tensorflow.python.keras.losses import BinaryCrossentropy
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.utils import plot_model
+from tensorflow.keras.metrics import AUC, Precision, Recall
+from tensorflow.keras.losses import BinaryCrossentropy
 
 warnings.filterwarnings('ignore')
 tf.get_logger().setLevel('ERROR')
@@ -55,6 +56,28 @@ class DeepLearningRecommender:
         self.track_encoder = None
         
         # Metrics tracking
+        def __init__(self, experiment_name="dl_rec"):
+            self._setup_directories(experiment_name)
+            self._setup_logging(experiment_name)
+            
+            # Initialize ALL instance attributes here
+            self.model = None
+            self.label_encoders = {}
+            self.scaler = MinMaxScaler()
+            self.track_features = None
+            self.artist_track_map = defaultdict(set)
+            self.track_id_map = {}
+            self.artist_id_map = {}
+            self.genre_map = {}
+            self.cluster_labels = None
+            self.best_hyperparams = None
+            self.experiment_name = experiment_name
+            
+            # Initialize metrics_history with all expected keys
+            self._init_metrics_history()
+            
+    def _init_metrics_history(self):
+        """Initialize metrics tracking dictionary"""
         self.metrics_history = {
             'train_loss': [],
             'val_loss': [],
@@ -84,17 +107,21 @@ class DeepLearningRecommender:
         path = f"{self.output_dir}/plots/{name}_{timestamp}.png"
         
         try:
+            # Handle Seaborn PairGrid objects
             if hasattr(fig, 'savefig'):
                 fig.savefig(path, bbox_inches='tight', dpi=300)
+            elif hasattr(fig, 'fig'):  # For Seaborn PairGrid
+                fig.fig.savefig(path, bbox_inches='tight', dpi=300)
             else:
                 plt.savefig(path, bbox_inches='tight', dpi=300)
-            plt.close()
-            self.logger.info(f"Saved visualization: {path}")
+                
+            # Only close if it's a matplotlib Figure
+            if isinstance(fig, plt.Figure):
+                plt.close(fig)
+            elif hasattr(fig, 'fig'):  # Close PairGrid's figure
+                plt.close(fig.fig)
         except Exception as e:
             self.logger.error(f"Error saving visualization {name}: {str(e)}")
-        finally:
-            if 'fig' in locals():
-                plt.close(fig)
         
     def _save_model(self):
         """Save model and metadata"""
@@ -104,6 +131,11 @@ class DeepLearningRecommender:
         
         # Save Keras model
         self.model.save(model_path)
+        print("Input data")
+        print([inp.shape for inp in self.model.inputs])
+        print("Summary")
+        self.model.summary()
+
         
         # Save metadata
         save_data = {
@@ -186,9 +218,9 @@ class DeepLearningRecommender:
         axes[0, 0].set_title('Loss')
         axes[0, 0].legend()
         
-        # RMSE
-        axes[0, 1].plot(history.history['root_mean_squared_error'], label='Train RMSE')
-        axes[0, 1].plot(history.history['val_root_mean_squared_error'], label='Validation RMSE')
+        # RMSE - Updated to use 'rmse' instead of 'root_mean_squared_error'
+        axes[0, 1].plot(history.history['rmse'], label='Train RMSE')
+        axes[0, 1].plot(history.history['val_rmse'], label='Validation RMSE')
         axes[0, 1].set_title('RMSE')
         axes[0, 1].legend()
         
@@ -308,6 +340,9 @@ class DeepLearningRecommender:
         # Hierarchical clustering
         self._apply_hierarchical_clustering(all_pairs)
         self.logger.info("Applied hierarchical clustering")
+
+        if 'cluster' not in all_pairs.columns:
+            raise ValueError("Cluster assignment failed - no 'cluster' column created")
         
         # Encode categorical features
         self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
@@ -324,6 +359,10 @@ class DeepLearningRecommender:
         if numeric_cols:
             all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
             self.logger.info("Scaled numerical features")
+        
+        # w preprocess_data:
+        self.feature_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'interaction']]
+        self.track_features = all_pairs.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
         
         return all_pairs
     
@@ -343,12 +382,21 @@ class DeepLearningRecommender:
         cluster_features = data[['danceability', 'energy', 'valence']].values
         Z = linkage(cluster_features, method='ward')
         self.cluster_labels = fcluster(Z, t=3, criterion='maxclust')
+        
+        # Ensure we're assigning to the DataFrame correctly
         data['cluster'] = self.cluster_labels
         
+        # Verify assignment
+        if 'cluster' not in data.columns:
+            raise ValueError("Failed to add cluster labels to DataFrame")
+        
         # Visualize with Seaborn
-        cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
-        grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
-        self._save_visualization(grid, "hierarchical_clustering")
+        try:
+            cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
+            grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
+            self._save_visualization(grid.fig, "hierarchical_clustering")  # Note: using grid.fig
+        except Exception as e:
+            self.logger.error(f"Could not visualize clusters: {str(e)}")
         
     def _build_model(self, num_artists, num_tracks, feature_dim, hyperparams):
         """Build deep learning recommendation model"""
@@ -399,12 +447,13 @@ class DeepLearningRecommender:
         )
         
         # Compile model
+# In your _build_model or initialize_model method:
         model.compile(
             optimizer=Adam(learning_rate=hyperparams['learning_rate']),
             loss=BinaryCrossentropy(),
             metrics=[
-                tf.keras.metrics.RootMeanSquaredError(name='root_mean_squared_error'),
-                tf.keras.metrics.MeanAbsoluteError(name='mean_absolute_error'),
+                tf.keras.metrics.RootMeanSquaredError(name='rmse'),  # Changed from 'root_mean_squared_error'
+                tf.keras.metrics.MeanAbsoluteError(name='mae'),
                 AUC(name='auc'),
                 Precision(name='precision'),
                 Recall(name='recall')
@@ -435,8 +484,8 @@ class DeepLearningRecommender:
         # Get dimensions
         num_artists = len(self.label_encoders['artist_id'].classes_)
         num_tracks = len(self.label_encoders['track_id'].classes_)
-        feature_cols = [col for col in data.columns if col not in ['artist_id', 'track_id', 'interaction']]
-        feature_dim = len(feature_cols)
+        self.feature_cols = [col for col in data.columns if col not in ['artist_id', 'track_id', 'interaction']]
+        feature_dim = len(self.feature_cols)
         
         self.logger.info(f"Initializing model with {num_artists} artists, {num_tracks} tracks, and {feature_dim} features")
         
@@ -446,20 +495,36 @@ class DeepLearningRecommender:
         
     def train_model(self, data):
         """Train the deep learning model"""
+            # Defensive check - ensure metrics_history exists
+        if not hasattr(self, 'metrics_history'):
+            self.logger.warning("metrics_history not found - initializing")
+            self._init_metrics_history()
+
         self.logger.info("\nStarting model training...")
         start_time = time.time()
         
         # Prepare data
-        feature_cols = [col for col in data.columns if col not in ['artist_id', 'track_id', 'interaction']]
+        self.feature_cols = [col for col in data.columns if col not in ['artist_id', 'track_id', 'interaction']]
         X_artist = self.label_encoders['artist_id'].transform(data['artist_id'])
         X_track = self.label_encoders['track_id'].transform(data['track_id'])
-        X_features = data[feature_cols].values
+        X_features = data[self.feature_cols].values
         y = data['interaction'].values
         
-        # Split data
-        X_artist_train, X_artist_val, X_track_train, X_track_val, X_features_train, X_features_val, y_train, y_val = train_test_split(
-            X_artist, X_track, X_features, y, test_size=0.2, random_state=42
-        )
+        X_artist = np.array(X_artist)
+        X_track = np.array(X_track)
+        X_features = np.array(X_features)
+        y = np.array(y)
+
+        print(type(X_artist), type(X_track), type(X_features), type(y))
+        print(train_test_split)
+
+
+        split = train_test_split(X_artist, X_track, X_features, y, test_size=0.2, random_state=42)
+        print(f"Split produced {len(split)} outputs, lengths: {[len(x) for x in split]}")
+        (X_artist_train, X_artist_val, 
+        X_track_train, X_track_val,
+        X_features_train, X_features_val,
+        y_train, y_val) = split
         
         # Callbacks
         callbacks = [
@@ -478,33 +543,68 @@ class DeepLearningRecommender:
             verbose=2
         )
         
-        # Training time
-        training_time = time.time() - start_time
-        self.metrics_history['training_time'].append(training_time)
-        self.logger.info(f"Training completed in {training_time:.2f} seconds")
-        
-        # Update metrics history
-        for metric in history.history:
-            if 'val_' in metric:
-                self.metrics_history[f'val_{metric}'].append(np.min(history.history[metric]))
+        # Rest of your training code...
+        try:
+        # Your existing training code
+            training_time = time.time() - start_time
+            
+            # Safe metric recording
+            if hasattr(self, 'metrics_history'):
+                self.metrics_history['training_time'].append(training_time)
             else:
-                self.metrics_history[f'train_{metric}'].append(np.min(history.history[metric]))
+                self.logger.error("metrics_history still not available!")
+                
+            # Process history metrics
+            if hasattr(self, 'metrics_history') and history:
         
-        # Plot training history
-        self._plot_training_history(history)
+                # Update metrics history
+                # With this more robust version:
+                for metric in history.history:
+                    # Handle both cases where metric might be 'mae' or 'mean_absolute_error'
+                    metric_name = metric.replace('val_', '').replace('train_', '')
+                    
+                    if metric.startswith('val_'):
+                        target_dict = self.metrics_history
+                        prefix = 'val_'
+                    else:
+                        target_dict = self.metrics_history
+                        prefix = 'train_'
+                    
+                    # Standardize metric names
+                    if metric_name == 'mean_absolute_error':
+                        metric_key = f'{prefix}mae'
+                    elif metric_name == 'root_mean_squared_error':
+                        metric_key = f'{prefix}rmse'
+                    else:
+                        metric_key = f'{prefix}{metric_name}'
+                    
+                    # Create key if it doesn't exist
+                    if metric_key not in target_dict:
+                        target_dict[metric_key] = []
+                    
+                    target_dict[metric_key].append(np.min(history.history[metric]))
+                
+                # Plot training history
+                self._plot_training_history(history)
+                
+                # Evaluate on full data
+                self.logger.info("\nEvaluating on full dataset...")
+                y_pred = self.model.predict([X_artist, X_track, X_features]).flatten()
+                metrics = self._calculate_metrics(y, y_pred, y_proba=y_pred)
+                
+                # Plot feature importance
+                self._plot_feature_importance()
+                
+                # Save model
+                model_path = self._save_model()
+                print("FEATURE COLS used during training:", self.feature_cols)
+                print("train_model X_features shape:", X_features.shape)
+                
+                return model_path
         
-        # Evaluate on full data
-        self.logger.info("\nEvaluating on full dataset...")
-        y_pred = self.model.predict([X_artist, X_track, X_features]).flatten()
-        metrics = self._calculate_metrics(y, y_pred, y_proba=y_pred)
-        
-        # Plot feature importance
-        self._plot_feature_importance()
-        
-        # Save model
-        model_path = self._save_model()
-        
-        return model_path
+        except Exception as e:
+            self.logger.error(f"Training failed: {str(e)}")
+            raise
     
     def recommend_tracks(self, artist_id, top_n=5):
         """Generate recommendations for given artist"""
@@ -516,23 +616,39 @@ class DeepLearningRecommender:
             return self._get_popular_tracks(top_n)
         
         # Get all tracks in same cluster
-        artist_tracks = list(self.artist_track_map[artist_id])
-        if len(artist_tracks) > 0:
+        artist_tracks = list(self.artist_track_map.get(artist_id, []))
+        if not artist_tracks:
+            return self._get_popular_tracks(top_n)
+
+        # Initialize variables with default values
+        valid_tracks = []
+        cluster = None
+        
+        # Get cluster for this artist (using first track as representative)
+        try:
             sample_track = artist_tracks[0]
-            cluster = self.track_features[self.track_features['track_id'] == sample_track]['cluster'].values[0]
-            candidate_tracks = self.track_features[self.track_features['cluster'] == cluster]['track_id'].unique()
-        else:
+            track_data = self.track_features[self.track_features['track_id'] == sample_track]
+            
+            if track_data.empty or 'cluster' not in track_data.columns:
+                self.logger.warning("No cluster information available - using all tracks")
+                candidate_tracks = self.track_features['track_id'].unique()
+            else:
+                cluster = track_data['cluster'].values[0]
+                candidate_tracks = self.track_features[self.track_features['cluster'] == cluster]['track_id'].unique()
+            
+            # Filter out tracks not in our training data
+            for t in valid_tracks:
+                row = self.track_features[self.track_features['track_id'] == t]
+                track_features.append(row[self.feature_cols].values[0])  # <-- zawsze te kolumny!            
+        except Exception as e:
+            self.logger.error(f"Error getting cluster: {str(e)}")
             candidate_tracks = self.track_features['track_id'].unique()
-        
-        # Prepare data for prediction
-        artist_ids = np.array([artist_id] * len(candidate_tracks))
-        track_ids = np.array(candidate_tracks)
-        
-        # Filter out tracks not in our training data
-        valid_tracks = [t for t in track_ids if t in self.label_encoders['track_id'].classes_]
+            valid_tracks = [t for t in candidate_tracks if t in self.label_encoders['track_id'].classes_]
+
         if not valid_tracks:
             return self._get_popular_tracks(top_n)
-            
+        
+        # Prepare data for prediction
         artist_ids = np.array([artist_id] * len(valid_tracks))
         track_ids = np.array(valid_tracks)
         
@@ -540,8 +656,8 @@ class DeepLearningRecommender:
         track_features = []
         for t in valid_tracks:
             features = self.track_features[self.track_features['track_id'] == t]
-            feature_cols = [col for col in features.columns if col not in ['artist_id', 'track_id', 'interaction']]
-            track_features.append(features[feature_cols].values[0])
+            self.feature_cols = [col for col in features.columns if col not in ['artist_id', 'track_id', 'interaction']]
+            track_features.append(features[self.feature_cols].values[0])
         
         track_features = np.array(track_features)
         
@@ -550,6 +666,13 @@ class DeepLearningRecommender:
         encoded_track = self.label_encoders['track_id'].transform(track_ids)
         
         # Generate predictions
+        print("FEATURE COLS at recommend:", self.feature_cols)
+        print("self.track_features.columns at recommend:", self.track_features.columns)
+        print("FEATURE SHAPE:", track_features.shape)
+        print("EXPECTED FEATURE COLS:", self.feature_cols)
+        print("Track features colnames at recommend:", features.columns)
+        print("X for model shapes:", encoded_artist.shape, encoded_track.shape, track_features.shape)
+        print("FIRST ROW FEATURE VECTOR SIZE:", track_features[0].shape)
         scores = self.model.predict([encoded_artist, encoded_track, track_features]).flatten()
         
         # Prepare results
@@ -563,7 +686,7 @@ class DeepLearningRecommender:
                 'danceability': track_data['danceability'],
                 'energy': track_data['energy'],
                 'valence': track_data['valence'],
-                'cluster': cluster
+                'cluster': cluster if cluster is not None else -1  # Default value if no cluster
             })
         
         # Sort and get top recommendations
@@ -580,7 +703,13 @@ class DeepLearningRecommender:
             ascending=False
         ).head(top_n)
         
-        return popular_tracks.to_dict('records')
+        # Dodaj score=None
+        result = []
+        for _, row in popular_tracks.iterrows():
+            d = row.to_dict()
+            d['score'] = None  # lub np. d['score'] = float('nan')
+            result.append(d)
+        return result
     
     def _setup_logging(self, experiment_name):
         """Configure logging to file and console"""
@@ -618,7 +747,7 @@ if __name__ == "__main__":
         recommender.logger.info("\nTop recommendations:")
         for i, rec in enumerate(recs, 1):
             recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | "
+                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | " if rec['score'] is not None else f"{i}. Track ID: {rec['track_id']} | "
                 f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
                 f"Cluster: {rec['cluster']}"
             )
