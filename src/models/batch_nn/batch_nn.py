@@ -4,19 +4,18 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
 from collections import defaultdict
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder
 from sklearn.metrics import (mean_squared_error, precision_score, recall_score, 
                            f1_score, roc_auc_score, average_precision_score,
-                           confusion_matrix, classification_report, log_loss)
+                           confusion_matrix, classification_report, log_loss, silhouette_score)
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import cosine
-import psutil
 import time
 import seaborn as sns
 import os
 import matplotlib.pyplot as plt
 import joblib
-import json
 from datetime import datetime
 import warnings
 import logging
@@ -36,6 +35,14 @@ warnings.filterwarnings('ignore')
 tf.get_logger().setLevel('ERROR')
 
 class DeepLearningRecommender:
+
+    NUMERIC_FEATURES = [
+    'popularity', 'acousticness', 'danceability', 'duration_ms', 'energy',
+    'instrumentalness', 'key', 'liveness', 'loudness', 'mode', 'speechiness',
+    'tempo', 'time_signature', 'valence']
+
+    OTHER_FEATURES = ['explicit', 'artist_id', 'release_id']
+
     def __init__(self, experiment_name="dl_rec"):
         self._setup_directories(experiment_name)
         self._setup_logging(experiment_name)
@@ -122,6 +129,30 @@ class DeepLearningRecommender:
                 plt.close(fig.fig)
         except Exception as e:
             self.logger.error(f"Error saving visualization {name}: {str(e)}")
+
+    def plot_feature_distributions(self, data):
+        """
+        Rysuje histogramy rozkładów cech z self.feature_cols
+        """
+        if data is None:
+            self.logger.error("plot_feature_distributions: data is None!")
+            return
+        feat_cols = self.feature_cols
+        if not feat_cols:
+            self.logger.error("plot_feature_distributions: feature_cols is empty!")
+            return
+        fig, axes = plt.subplots(1, min(3, len(feat_cols)), figsize=(15, 4))
+        if len(feat_cols) == 1:
+            axes = [axes]
+        for ax, feat in zip(axes, feat_cols[:3]):
+            if feat not in data.columns:
+                self.logger.warning(f"plot_feature_distributions: {feat} not found in data.columns")
+                continue
+            sns.histplot(data[feat], ax=ax, kde=True)
+            ax.set_title(f'Distribution of {feat}')
+        plt.tight_layout()
+        plt.savefig(f"{self.output_dir}/plots/feature_dist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        plt.close(fig)
         
     def _save_model(self):
         """Save model and metadata"""
@@ -207,6 +238,33 @@ class DeepLearningRecommender:
         self._save_visualization(fig, "confusion_matrix")
         
         return metrics
+
+    def plot_elbow_and_silhouette(self, data, max_clusters=10):
+        features = data[self.feature_cols].fillna(0).values
+
+        inertias = []
+        silhouettes = []
+
+        for k in range(2, max_clusters + 1):
+            kmeans = KMeans(n_clusters=k, random_state=42)
+            labels = kmeans.fit_predict(features)
+            inertias.append(kmeans.inertia_)
+            silhouettes.append(silhouette_score(features, labels))
+        
+        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+        ax[0].plot(range(2, max_clusters + 1), inertias, marker='o')
+        ax[0].set_title('Elbow curve (inertia)')
+        ax[0].set_xlabel('Number of clusters')
+        ax[0].set_ylabel('Inertia')
+
+        ax[1].plot(range(2, max_clusters + 1), silhouettes, marker='o', color='green')
+        ax[1].set_title('Silhouette score')
+        ax[1].set_xlabel('Number of clusters')
+        ax[1].set_ylabel('Score')
+        plt.tight_layout()
+        plt.savefig(f"{self.output_dir}/plots/elbow_silhouette_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        plt.close(fig)
+        print('Elbow/silhouette plot saved!')
     
     def _plot_training_history(self, history):
         """Plot training history metrics"""
@@ -271,99 +329,106 @@ class DeepLearningRecommender:
         except Exception as e:
             self.logger.warning(f"Could not plot feature importance: {str(e)}")
             
-    def preprocess_data(self, file_path, sample_size=10000):
-        """Preprocessing with genre clustering and feature engineering"""
-        self.logger.info("Loading and preprocessing data with hierarchical clustering...")
+    def preprocess_data(
+        self, 
+        file_path, 
+        sample_size=None, 
+        n_clusters=6, 
+        elbow_max_clusters=12
+    ):
+        """
+        Preprocessing: Wczytanie, czyszczenie, feat.eng, kodowanie explict, kodowanie id, 
+        generowanie all_pairs, clustering, zapisywanie wykresów jakości klasteryzacji, 
+        przygotowanie gotowych tablic do trenowania i rekomendacji.
+        """
+        ### 1. Wczytanie danych
+        self.logger.info("Loading CSV data...")
         data = pd.read_csv(file_path)
-        
-        # Check if 'interaction' column exists, if not create it
-        if 'interaction' not in data.columns:
-            self.logger.info("'Interaction' column not found - creating positive interactions")
-            data['interaction'] = 1  # Assume all existing records are positive interactions
-            self.logger.info("'Interaction' column created")
+        if sample_size:
+            data = data.sample(sample_size, random_state=42)
 
-        # Create genre proxy from artist_id
-        data['genre'] = data['artist_id'].apply(lambda x: hash(x) % 5)  # Simulate 5 genres
-        self.logger.info("'Genre' column created")
-        
-        # Feature selection strategy
-        feature_strategy = self._get_feature_strategy(strategy='content')
-        cols_to_keep = feature_strategy + ['artist_id', 'track_id', 'genre', 'interaction']
-        
-        # Only keep columns that actually exist in the data
-        cols_to_keep = [col for col in cols_to_keep if col in data.columns]
-        data = data[cols_to_keep]
-        self.logger.info("Columns to keep filtered")
+        # 2. Zamień explicit na 0/1
+        if 'explicit' in data.columns:
+            data['explicit'] = data['explicit'].astype(int)
 
-        # Create positive pairs
-        positive_pairs = data[['artist_id', 'track_id', 'genre']].drop_duplicates()
-        positive_pairs['interaction'] = 1
-        
-        # Create artist-track-genre map
-        for _, row in positive_pairs.iterrows():
-            self.artist_track_map[row['artist_id']].add(row['track_id'])
-            self.genre_map[row['artist_id']] = row['genre']
-        self.logger.info("Artist-track-genre map created")
-        
-        # Generate negative samples
-        negative_samples = []
-        all_tracks = set(data['track_id'].unique())
-
-        for artist in self.artist_track_map:
-            artist_tracks = self.artist_track_map[artist]
-            negative_tracks = list(all_tracks - artist_tracks)
-            
-            if negative_tracks:
-                sampled_negatives = np.random.choice(
-                    negative_tracks, 
-                    size=min(len(artist_tracks), len(negative_tracks)), 
-                    replace=False
+        # 3. Kodowanie artist_id i release_id (przyjmujemy JEDEN artysta, JEDEN album per track)
+        for col in ['artist_id', 'release_id']:
+            if col in data.columns:
+                # Jeśli lista w stringu: zamień na pierwszy element listy
+                data[col] = data[col].apply(
+                    lambda x: eval(x)[0] if (isinstance(x, str) and x.startswith('[')) else x
                 )
-                for track in sampled_negatives:
-                    negative_samples.append({
-                        'artist_id': artist,
-                        'track_id': track,
-                        'genre': self.genre_map[artist],
-                        'interaction': 0
-                    })
+                le = LabelEncoder()
+                data[col + '_le'] = le.fit_transform(data[col])
+                self.label_encoders[col] = le
+
+        # 4. Zdefiniuj CECHY NAUCZANIA
+        NUMERIC_FEATURES = [
+            'popularity', 'acousticness', 'danceability', 'duration_ms', 'energy',
+            'instrumentalness', 'key', 'liveness', 'loudness', 'mode', 'speechiness',
+            'tempo', 'time_signature', 'valence'
+        ]
+        ID_FEATURES = ['explicit', 'artist_id_le', 'release_id_le']
+        ALL_FEATURES = NUMERIC_FEATURES + ID_FEATURES
+        self.feature_cols = [col for col in ALL_FEATURES if col in data.columns]
+        self.logger.info(f"feature_cols: {self.feature_cols}")
+
+        # 5. Sklejenie podstawowej tablicy track_features
+        self.track_features = data[['track_id'] + self.feature_cols].drop_duplicates('track_id')
+        self.logger.info(f"track_features shape: {self.track_features.shape}")
+
+        # 6. Generuj positive pairs (wszystkie unikalne tracki/artist relacje)
+        positive_pairs = data[['artist_id', 'track_id']].drop_duplicates().copy()
+        positive_pairs['interaction'] = 1
+
+        # 7. Negative sampling (po prostu losowo dla par artist-track, które nie istnieją)
+        all_artists = data['artist_id'].unique()
+        all_tracks = data['track_id'].unique()
+        negative_samples = []
+
+        artist_track_positive = set(zip(positive_pairs['artist_id'], positive_pairs['track_id']))
+        np.random.seed(42)
+        for artist in all_artists:
+            pos_tracks = set(data[data['artist_id'] == artist]['track_id'])
+            neg_tracks = list(set(all_tracks) - pos_tracks)
+            if not neg_tracks or not pos_tracks:
+                continue
+            sampled_negatives = np.random.choice(
+                neg_tracks, size=min(len(pos_tracks), len(neg_tracks)), replace=False
+            )
+            for track in sampled_negatives:
+                negative_samples.append({'artist_id': artist, 'track_id': track, 'interaction': 0})
 
         negative_pairs = pd.DataFrame(negative_samples)
-        all_pairs = pd.concat([positive_pairs, negative_pairs])
-        self.logger.info(f"Created {len(negative_pairs)} negative samples")
-        self.logger.info(f"Total pairs: {len(all_pairs)}")
+        all_pairs = pd.concat([positive_pairs, negative_pairs], ignore_index=True)
+        self.logger.info(f"Positive pairs: {len(positive_pairs)}, Negative pairs: {len(negative_pairs)}")
 
-        # Add track features
-        self.track_features = data.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
-        all_pairs = all_pairs.merge(self.track_features, on='track_id')
-        self.logger.info("Added track features")
+        # 8. Uzupełnij cechy trackowe do par (join po track_id)
+        all_pairs = all_pairs.merge(self.track_features, how='left', on='track_id')
+        self.logger.info(f"all_pairs shape after merge: {all_pairs.shape}")
 
-        # Hierarchical clustering
-        self._apply_hierarchical_clustering(all_pairs)
-        self.logger.info("Applied hierarchical clustering")
-
-        if 'cluster' not in all_pairs.columns:
-            raise ValueError("Cluster assignment failed - no 'cluster' column created")
-        
-        # Encode categorical features
+        # 9. Uzupełnij encoder dla artistów jeśli używasz w modelu
         self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
         self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
-        self.logger.info("Encoded categorical features")
-        
-        # Create mappings
-        self.track_id_map = dict(zip(all_pairs['track_id'], all_pairs['track_id'].astype('category').cat.codes))
-        self.artist_id_map = dict(zip(all_pairs['artist_id'], all_pairs['artist_id'].astype('category').cat.codes))
-        self.logger.info("Created ID mappings")
-        
-        # Scale numerical features
-        numeric_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'genre', 'interaction', 'cluster']]
-        if numeric_cols:
-            all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
-            self.logger.info("Scaled numerical features")
-        
-        # w preprocess_data:
-        self.feature_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'interaction']]
-        self.track_features = all_pairs.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
-        
+
+        # 10. Scaling numerycznych cech
+        scaler = MinMaxScaler()
+        all_pairs[self.feature_cols] = scaler.fit_transform(all_pairs[self.feature_cols].fillna(0))
+        self.scaler = scaler
+
+        # 11. ELBOW & SILHOUETTE (zapisywanie wykresu) — przed klasteryzacją!
+        self.plot_elbow_and_silhouette(all_pairs, max_clusters=elbow_max_clusters)
+
+        # 12. HIERARCHICZNE KLASTRY ZAPISANE JAKO 'cluster'
+        all_pairs = self._apply_hierarchical_clustering(all_pairs, n_clusters)
+        self.logger.info(f"Applied hierarchical clustering with n_clusters={n_clusters}")
+
+        # 13. Wykresy rozkładów cech
+        self.plot_feature_distributions(all_pairs)
+
+        # 14. Uaktualnij też self.track_features żeby zawierała 'cluster'
+        self.track_features = all_pairs[['track_id'] + self.feature_cols + ['cluster']].drop_duplicates('track_id')
+
         return all_pairs
     
     def _get_feature_strategy(self, strategy='content'):
@@ -377,11 +442,11 @@ class DeepLearningRecommender:
         else:
             return ['danceability', 'energy', 'valence']
     
-    def _apply_hierarchical_clustering(self, data):
+    def _apply_hierarchical_clustering(self, data, n_clusters = 6):
         """Apply hierarchical clustering to tracks"""
-        cluster_features = data[['danceability', 'energy', 'valence']].values
+        cluster_features = data[self.feature_cols].fillna(0).values
         Z = linkage(cluster_features, method='ward')
-        self.cluster_labels = fcluster(Z, t=3, criterion='maxclust')
+        self.cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
         
         # Ensure we're assigning to the DataFrame correctly
         data['cluster'] = self.cluster_labels
@@ -397,6 +462,8 @@ class DeepLearningRecommender:
             self._save_visualization(grid.fig, "hierarchical_clustering")  # Note: using grid.fig
         except Exception as e:
             self.logger.error(f"Could not visualize clusters: {str(e)}")
+
+        return data
         
     def _build_model(self, num_artists, num_tracks, feature_dim, hyperparams):
         """Build deep learning recommendation model"""
@@ -693,6 +760,40 @@ class DeepLearningRecommender:
         recommendations.sort(key=lambda x: x['score'], reverse=True)
         return recommendations[:top_n]
     
+    def recommend_similar_tracks(self, base_track_id, top_n=5):
+        # znajdź features bazowego utworu
+        origin = self.track_features[self.track_features['track_id'] == base_track_id]
+        if origin.empty:
+            self.logger.warning('Base track not found!')
+            return []
+        base_vec = origin[self.feature_cols].iloc[0].values.astype(float)
+
+        # wyklucz bazowy utwór z puli
+        candidates = self.track_features[self.track_features['track_id'] != base_track_id]
+        candidate_vecs = candidates[self.feature_cols].values.astype(float)
+
+        # podobieństwo kosinusowe do base_vec (wszystkie kawałki)
+        from sklearn.metrics.pairwise import cosine_similarity
+        scores = cosine_similarity([base_vec], candidate_vecs)[0]
+        # wybierz top_n najbardziej podobnych (INDEKSY)
+        top_idx = np.argsort(scores)[::-1][:top_n]
+
+        # pobierz track_id i score dla top wyników
+        recs = []
+        for idx in top_idx:
+            tr = candidates.iloc[idx]
+            recs.append({
+                'track_id': tr['track_id'],
+                'score': scores[idx],
+                'track_name': tr.get('track_name', ''),
+                'artist_id': tr.get('artist_id', ''),
+                'danceability': tr.get('danceability', np.nan),
+                'energy': tr.get('energy', np.nan),
+                'valence': tr.get('valence', np.nan),
+                'cluster': tr.get('cluster', '-')
+            })
+        return recs
+    
     def _get_popular_tracks(self, top_n=5):
         """Fallback method using cluster information"""
         if self.track_features is None:
@@ -742,12 +843,13 @@ if __name__ == "__main__":
         # Step 4: Get recommendations
         example_artist = data['artist_id'].iloc[0]
         recommender.logger.info(f"\nRecommendations for artist {example_artist}:")
-        recs = recommender.recommend_tracks(example_artist, top_n=5)
+        #recs = recommender.recommend_tracks(example_artist, top_n=5)
+        recs = recommender.recommend_similar_tracks(base_track_id='0009Q7nGlWjFzSjQIo9PmK')
         
         recommender.logger.info("\nTop recommendations:")
         for i, rec in enumerate(recs, 1):
             recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | " if rec['score'] is not None else f"{i}. Track ID: {rec['track_id']} | "
+                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | "
                 f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
                 f"Cluster: {rec['cluster']}"
             )
