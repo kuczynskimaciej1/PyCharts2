@@ -1,34 +1,37 @@
 from surprise import SVD, Dataset, Reader, accuracy
-from surprise.model_selection import cross_validate, train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV
 import pandas as pd
 import numpy as np
 from collections import defaultdict
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
-from sklearn.metrics import (mean_squared_error, precision_score, recall_score, 
-                           f1_score, roc_auc_score, average_precision_score,
-                           confusion_matrix, classification_report, log_loss)
+from sklearn.metrics import (mean_squared_error, precision_score, recall_score, f1_score, 
+                             roc_auc_score, average_precision_score, confusion_matrix, 
+                             classification_report, log_loss, silhouette_score)
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import cosine
-from scipy import stats
-import psutil
 import time
 import seaborn as sns
-import pingouin as pg
 import os
 import matplotlib.pyplot as plt
 import joblib
-import json
 from datetime import datetime
 import warnings
 import logging
+
 warnings.filterwarnings('ignore')
 
-class SVDBasedRecommender:
-    def __init__(self, experiment_name="svd_rec"):
+class BatchSVDRecommender:
+
+    NUMERIC_FEATURES = [
+        'popularity', 'acousticness', 'danceability', 'duration_ms', 'energy',
+        'instrumentalness', 'key', 'liveness', 'loudness', 'mode', 'speechiness',
+        'tempo', 'time_signature', 'valence'
+    ]
+    OTHER_FEATURES = ['explicit', 'artist_id', 'release_id']
+
+    def __init__(self, experiment_name="batch_svd_rec"):
         self._setup_directories(experiment_name)
         self._setup_logging(experiment_name)
-        
-        # Initialize model attributes
         self.model = None
         self.label_encoders = {}
         self.scaler = MinMaxScaler()
@@ -40,49 +43,48 @@ class SVDBasedRecommender:
         self.cluster_labels = None
         self.best_hyperparams = None
         self.experiment_name = experiment_name
-        
-        # Metrics tracking
+        self._init_metrics_history()
+        self.feature_cols = None
+
+    def _init_metrics_history(self):
         self.metrics_history = {
-            'rmse': [],
-            'mae': [],
-            'precision': [],
-            'recall': [],
-            'f1': [],
-            'roc_auc': [],
-            'pr_auc': [],
+            'train_loss': [],
+            'val_loss': [],
+            'train_rmse': [],
+            'val_rmse': [],
+            'train_mae': [],
+            'val_mae': [],
+            'train_auc': [],
+            'val_auc': [],
+            'train_precision': [],
+            'val_precision': [],
+            'train_recall': [],
+            'val_recall': [],
             'training_time': []
         }
-        
+
     def _setup_directories(self, experiment_name):
-        """Create directories for outputs"""
         self.output_dir = f"outputs/{experiment_name}"
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(f"{self.output_dir}/plots", exist_ok=True)
         os.makedirs(f"{self.output_dir}/models", exist_ok=True)
-        
+
     def _save_visualization(self, fig, name):
-        """Save visualization to file"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = f"{self.output_dir}/plots/{name}_{timestamp}.png"
-        
         try:
             if hasattr(fig, 'savefig'):
                 fig.savefig(path, bbox_inches='tight', dpi=300)
             else:
                 plt.savefig(path, bbox_inches='tight', dpi=300)
-            plt.close()
+            plt.close(fig)
             self.logger.info(f"Saved visualization: {path}")
         except Exception as e:
             self.logger.error(f"Error saving visualization {name}: {str(e)}")
-        finally:
-            if 'fig' in locals():
-                plt.close(fig)
-        
+
     def _save_model(self):
-        """Save model and metadata"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_path = f"{self.output_dir}/models/model_{timestamp}.joblib"
-        
         save_data = {
             'model': self.model,
             'label_encoders': self.label_encoders,
@@ -98,13 +100,11 @@ class SVDBasedRecommender:
             'hyperparams': self.best_hyperparams,
             'metrics': self.metrics_history
         }
-        
         joblib.dump(save_data, model_path)
-        self.logger.info(f"Saved model and metadata: {model_path}")
+        self.logger.info(f"Saved model: {model_path}")
         return model_path
-        
+
     def _load_model(self, model_path):
-        """Load saved model and metadata"""
         data = joblib.load(model_path)
         self.model = data['model']
         self.label_encoders = data['label_encoders']
@@ -118,30 +118,229 @@ class SVDBasedRecommender:
         self.best_hyperparams = data['hyperparams']
         self.metrics_history = data.get('metrics', {})
         self.logger.info(f"Loaded model from: {model_path}")
-        
+
+    def plot_feature_distributions(self, data):
+        feat_cols = self.feature_cols
+        fig, axes = plt.subplots(1, min(3, len(feat_cols)), figsize=(15, 4))
+        if len(feat_cols) == 1:
+            axes = [axes]
+        for ax, feat in zip(axes, feat_cols[:3]):
+            if feat not in data.columns: continue
+            sns.histplot(data[feat], ax=ax, kde=True)
+            ax.set_title(f'Distribution of {feat}')
+        plt.tight_layout()
+        path = f"{self.output_dir}/plots/feature_dist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(path)
+        plt.close(fig)
+        self.logger.info(f"Saved feature distributions: {path}")
+
+    def plot_elbow_and_silhouette(self, data, max_clusters=10):
+        features = data[self.feature_cols].fillna(0).values
+        inertias, silhouettes = [], []
+        for k in range(2, max_clusters + 1):
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=k, random_state=42)
+            labels = kmeans.fit_predict(features)
+            inertias.append(kmeans.inertia_)
+            silhouettes.append(silhouette_score(features, labels))
+        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+        ax[0].plot(range(2, max_clusters + 1), inertias, marker='o')
+        ax[0].set_title('Elbow curve (inertia)')
+        ax[1].plot(range(2, max_clusters + 1), silhouettes, marker='o', color='green')
+        ax[1].set_title('Silhouette score')
+        plt.tight_layout()
+        path = f"{self.output_dir}/plots/elbow_silhouette_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(path)
+        plt.close(fig)
+
+    def _plot_training_history(self):
+        # Plots for training metrics
+        hist = self.metrics_history
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        # RMSE/MAE
+        axes[0, 0].plot(hist['train_rmse'], label='Train RMSE')
+        axes[0, 0].plot(hist['val_rmse'], label='Val RMSE')
+        axes[0, 0].set_title('RMSE'); axes[0, 0].legend()
+        axes[0, 1].plot(hist['train_mae'], label='Train MAE')
+        axes[0, 1].plot(hist['val_mae'], label='Val MAE')
+        axes[0, 1].set_title('MAE'); axes[0, 1].legend()
+        # AUC
+        axes[1, 0].plot(hist['train_auc'], label='Train AUC')
+        axes[1, 0].plot(hist['val_auc'], label='Val AUC')
+        axes[1, 0].set_title('AUC'); axes[1, 0].legend()
+        # Precision, Recall
+        axes[1, 1].plot(hist['train_precision'], label='Train Prec')
+        axes[1, 1].plot(hist['val_precision'], label='Val Prec')
+        axes[1, 1].plot(hist['train_recall'], label='Train Rec')
+        axes[1, 1].plot(hist['val_recall'], label='Val Rec')
+        axes[1, 1].set_title('Precision/Recall'); axes[1, 1].legend()
+        plt.tight_layout()
+        self._save_visualization(fig, "training_history")
+
+    def _plot_feature_importance(self):
+        # SVD nie ma feature importance, ale można wykreslić wariancję faktorów
+        try:
+            user_factors = self.model.pu
+            item_factors = self.model.qi
+            user_importance = np.var(user_factors, axis=0)
+            item_importance = np.var(item_factors, axis=0)
+            fig1, ax1 = plt.subplots(figsize=(8, 5))
+            sns.barplot(x=user_importance, y=[f"UF_{i}" for i in range(len(user_importance))], ax=ax1)
+            ax1.set_title('User Latent Factors Importance')
+            self._save_visualization(fig1, "user_factors_importance")
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            sns.barplot(x=item_importance, y=[f"IF_{i}" for i in range(len(item_importance))], ax=ax2)
+            ax2.set_title('Item Latent Factors Importance')
+            self._save_visualization(fig2, "item_factors_importance")
+        except Exception as e:
+            self.logger.warning(f"Could not plot feature importance: {str(e)}")
+
+    def preprocess_data_balanced(
+        self, 
+        file_path, 
+        sample_size=None, 
+        n_clusters=6, 
+        elbow_max_clusters=12,
+        negatives_ratio=2
+    ):
+        self.logger.info("Loading CSV data...")
+        data = pd.read_csv(file_path)
+        if sample_size: data = data.sample(sample_size, random_state=42)
+        if 'explicit' in data.columns: data['explicit'] = data['explicit'].astype(int)
+        for col in ['artist_id', 'release_id']:
+            if col in data.columns:
+                data[col] = data[col].apply(lambda x: eval(x)[0] if (isinstance(x, str) and x.startswith('[')) else x)
+                le = LabelEncoder()
+                data[col + '_le'] = le.fit_transform(data[col])
+                self.label_encoders[col] = le
+        ALL_FEATURES = [f for f in self.NUMERIC_FEATURES + ['explicit', 'artist_id_le', 'release_id_le'] if f in data.columns]
+        self.feature_cols = ALL_FEATURES
+
+        self.track_features = data[['track_id'] + self.feature_cols].drop_duplicates('track_id')
+        positive_pairs = data[['artist_id', 'track_id']].drop_duplicates().copy()
+        positive_pairs['interaction'] = 1
+
+        all_artists = data['artist_id'].unique()
+        all_tracks = data['track_id'].unique()
+        negative_samples = []
+        artist_track_positive = set(zip(positive_pairs['artist_id'], positive_pairs['track_id']))
+        np.random.seed(42)
+        for artist in all_artists:
+            pos_tracks = set(data[data['artist_id'] == artist]['track_id'])
+            neg_tracks = list(set(all_tracks) - pos_tracks)
+            # Agresywnie: więcej negatywnych niż pozytywnych, ale nie 100x!
+            n_pos = len(pos_tracks)
+            neg_samples_to_draw = min(len(neg_tracks), n_pos * negatives_ratio)
+            if neg_samples_to_draw == 0: continue
+            sampled_negatives = np.random.choice(neg_tracks, size=neg_samples_to_draw, replace=False)
+            for track in sampled_negatives:
+                negative_samples.append({'artist_id': artist, 'track_id': track, 'interaction': 0})
+
+        negative_pairs = pd.DataFrame(negative_samples)
+        all_pairs = pd.concat([positive_pairs, negative_pairs], ignore_index=True)
+        # Wywal rzadkich userów/itemów
+        min_occurrences = 3
+        value_counts_artist = all_pairs['artist_id'].value_counts()
+        value_counts_track = all_pairs['track_id'].value_counts()
+        to_keep_artist = value_counts_artist[value_counts_artist >= min_occurrences].index
+        to_keep_track = value_counts_track[value_counts_track >= min_occurrences].index
+        all_pairs = all_pairs[all_pairs['artist_id'].isin(to_keep_artist) & all_pairs['track_id'].isin(to_keep_track)]
+        all_pairs = all_pairs.merge(self.track_features, how='left', on='track_id')
+
+        self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
+        self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
+
+        scaler = MinMaxScaler()
+        all_pairs[self.feature_cols] = scaler.fit_transform(all_pairs[self.feature_cols].fillna(0))
+        self.scaler = scaler
+        self.plot_elbow_and_silhouette(all_pairs, max_clusters=elbow_max_clusters)
+        all_pairs = self._apply_hierarchical_clustering(all_pairs, n_clusters)
+        self.logger.info(f"Applied hierarchical clustering with n_clusters={n_clusters}")
+        self.plot_feature_distributions(all_pairs)
+        self.track_features = all_pairs[['track_id'] + self.feature_cols + ['cluster']].drop_duplicates('track_id')
+        return all_pairs
+
+    def _apply_hierarchical_clustering(self, data, n_clusters = 6):
+        cluster_features = data[self.feature_cols].fillna(0).values
+        Z = linkage(cluster_features, method='ward')
+        self.cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+        data['cluster'] = self.cluster_labels
+        # Visualization
+        try:
+            cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
+            grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
+            self._save_visualization(grid.fig, "hierarchical_clustering")
+        except Exception as e:
+            self.logger.error(f"Could not visualize clusters: {str(e)}")
+        return data
+    
+    def gridsearch_model(self, data):
+        reader = Reader(rating_scale=(0, 1))
+        surprise_data = Dataset.load_from_df(data[['artist_id', 'track_id', 'interaction']], reader)
+        param_grid = {
+            'n_factors': [8, 12, 16, 24, 32],
+            'n_epochs': [20, 30, 40],
+            'lr_all': [0.002, 0.005, 0.01],
+            'reg_all': [0.05, 0.08, 0.1, 0.2]   # WIĘKSZA regularizacja
+        }
+        gs = GridSearchCV(SVD, param_grid, measures=['rmse', 'mae'], cv=4, n_jobs=-1)
+        gs.fit(surprise_data)
+        best_params = gs.best_params['rmse']
+        self.logger.info(f"Best RMSE: {gs.best_score['rmse']:0.4f} Best params: {best_params}")
+        self.initialize_model(
+            n_factors=best_params['n_factors'], n_epochs=best_params['n_epochs'],
+            lr_all=best_params['lr_all'], reg_all=best_params['reg_all']
+        )
+        return best_params
+    
+    def rebalance_global_positive_negative_pairs(self, all_pairs: pd.DataFrame, random_state=42):
+        """
+        Zapewnia balans liczby pozytywnych i negatywnych przykładów na poziomie całego zbioru.
+        Wybiera losowy podzbiór negatywnych tak, by liczebność = liczba pozytywnych.
+        """
+        pos = all_pairs[all_pairs['interaction'] == 1]
+        neg = all_pairs[all_pairs['interaction'] == 0]
+        n_pos = len(pos)
+        n_neg = len(neg)
+        if n_neg > n_pos:
+            neg_balanced = neg.sample(n=n_pos, random_state=random_state)
+        else:
+            neg_balanced = neg
+        all_pairs_balanced = pd.concat([pos, neg_balanced], ignore_index=True)
+        all_pairs_balanced = all_pairs_balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+        self.logger.info(f"After global rebalancing: {all_pairs_balanced['interaction'].value_counts().to_dict()}")
+        return all_pairs_balanced
+
+    def initialize_model(self, n_factors=32, n_epochs=20, lr_all=0.005, reg_all=0.02):
+        self.model = SVD(
+            n_factors=n_factors,
+            n_epochs=n_epochs,
+            lr_all=lr_all,
+            reg_all=reg_all,
+            random_state=42
+        )
+        self.best_hyperparams = {
+            'n_factors': n_factors, 'n_epochs': n_epochs,
+            'lr_all': lr_all, 'reg_all': reg_all
+        }
+        self.logger.info(f"Initialized SVD model with: {self.best_hyperparams}")
+
     def _calculate_metrics(self, y_true, y_pred, y_proba=None, threshold=0.5):
-        """Calculate comprehensive performance metrics"""
         y_pred_binary = (y_pred >= threshold).astype(int)
         y_true_binary = (y_true >= threshold).astype(int)
-        
         metrics = {
             'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
             'mae': mean_squared_error(y_true, y_pred),
-            'precision': precision_score(y_true_binary, y_pred_binary),
-            'recall': recall_score(y_true_binary, y_pred_binary),
-            'f1': f1_score(y_true_binary, y_pred_binary)
+            'precision': precision_score(y_true_binary, y_pred_binary, zero_division=0),
+            'recall': recall_score(y_true_binary, y_pred_binary, zero_division=0),
+            'f1': f1_score(y_true_binary, y_pred_binary, zero_division=0)
         }
-        
         if y_proba is not None:
             metrics.update({
                 'roc_auc': roc_auc_score(y_true_binary, y_proba),
                 'pr_auc': average_precision_score(y_true_binary, y_proba)
             })
-        
-        # Log classification report
         self.logger.info("\nClassification Report:\n" + classification_report(y_true_binary, y_pred_binary))
-        
-        # Plot confusion matrix
         cm = confusion_matrix(y_true_binary, y_pred_binary)
         fig, ax = plt.subplots(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
@@ -149,381 +348,168 @@ class SVDBasedRecommender:
         ax.set_ylabel('Actual')
         ax.set_title('Confusion Matrix')
         self._save_visualization(fig, "confusion_matrix")
-        
         return metrics
-    
-    def _calculate_additional_metrics(self, y_true, y_pred, y_proba):
-        """Calculate additional metrics"""
-        metrics = {}
-        y_true_binary = (y_true >= 0.5).astype(int)
-        y_pred_binary = (y_pred >= 0.5).astype(int)
-        
-        # Log Loss
-        if len(np.unique(y_true_binary)) > 1:
-            metrics['log_loss'] = log_loss(y_true_binary, y_proba)
-        
-        # Cosine Similarity
-        pred_dist = np.bincount(y_pred_binary) / len(y_pred_binary)
-        true_dist = np.bincount(y_true_binary) / len(y_true_binary)
-        max_classes = max(len(pred_dist), len(true_dist))
-        pred_dist.resize(max_classes)
-        true_dist.resize(max_classes)
-        metrics['cosine_sim'] = 1 - cosine(pred_dist, true_dist)
-        
-        return metrics
-    
-    def _plot_metrics_history(self):
-        """Plot training metrics over time"""
-        if not self.metrics_history:
-            return
-            
-        fig = plt.figure(figsize=(15, 12))
-        gs = fig.add_gridspec(3, 2)
-        
-        # Error metrics
-        ax1 = fig.add_subplot(gs[0, 0])
-        for metric in ['rmse', 'mae']:
-            if metric in self.metrics_history and self.metrics_history[metric]:
-                ax1.plot(self.metrics_history[metric], label=metric)
-        ax1.set_title('Error Metrics')
-        ax1.legend()
-        
-        # Classification metrics
-        ax2 = fig.add_subplot(gs[0, 1])
-        for metric in ['precision', 'recall', 'f1']:
-            if metric in self.metrics_history and self.metrics_history[metric]:
-                ax2.plot(self.metrics_history[metric], label=metric)
-        ax2.set_title('Classification Metrics')
-        ax2.legend()
-        
-        # Probability metrics
-        ax3 = fig.add_subplot(gs[1, 0])
-        for metric in ['roc_auc', 'pr_auc']:
-            if metric in self.metrics_history and self.metrics_history[metric]:
-                ax3.plot(self.metrics_history[metric], label=metric)
-        ax3.set_title('Probability Metrics')
-        ax3.legend()
-        
-        # Training time
-        ax4 = fig.add_subplot(gs[1, 1])
-        if 'training_time' in self.metrics_history:
-            ax4.plot(self.metrics_history['training_time'], label='Training Time (s)')
-        ax4.set_title('Training Time')
-        ax4.legend()
-        
-        plt.tight_layout()
-        self._save_visualization(fig, "full_metrics_history")
-        
-    def _plot_feature_importance(self):
-        """Plot latent feature importance"""
-        try:
-            if hasattr(self.model, 'pu') and hasattr(self.model, 'qi'):
-                # Get user and item factors
-                user_factors = self.model.pu
-                item_factors = self.model.qi
-                
-                # Calculate feature importance as variance explained
-                user_importance = np.var(user_factors, axis=0)
-                item_importance = np.var(item_factors, axis=0)
-                
-                # Plot user factors importance
-                fig1, ax1 = plt.subplots(figsize=(10, 6))
-                sns.barplot(x=user_importance, y=[f"UF_{i}" for i in range(len(user_importance))], ax=ax1)
-                ax1.set_title('User Latent Factors Importance')
-                self._save_visualization(fig1, "user_factors_importance")
-                
-                # Plot item factors importance
-                fig2, ax2 = plt.subplots(figsize=(10, 6))
-                sns.barplot(x=item_importance, y=[f"IF_{i}" for i in range(len(item_importance))], ax=ax2)
-                ax2.set_title('Item Latent Factors Importance')
-                self._save_visualization(fig2, "item_factors_importance")
-        except Exception as e:
-            self.logger.warning(f"Could not plot feature importance: {str(e)}")
-            
-    def preprocess_data(self, file_path, sample_size=10000):
-        """Preprocessing with genre clustering and feature engineering"""
-        self.logger.info("Loading and preprocessing data with hierarchical clustering...")
-        data = pd.read_csv(file_path)
-        
-        # Check if 'interaction' column exists, if not create it
-        if 'interaction' not in data.columns:
-            self.logger.info("'Interaction' column not found - creating positive interactions")
-            data['interaction'] = 1  # Assume all existing records are positive interactions
-            self.logger.info("'Interaction' column created")
 
-        # Create genre proxy from artist_id
-        data['genre'] = data['artist_id'].apply(lambda x: hash(x) % 5)  # Simulate 5 genres
-        self.logger.info("'Genre' column created")
-        
-        # Feature selection strategy
-        feature_strategy = self._get_feature_strategy(strategy='content')
-        self.logger.info("Feature strategy chosen as content")
-        cols_to_keep = feature_strategy + ['artist_id', 'track_id', 'genre', 'interaction']
-        self.logger.info("Columns to keep chosen")
-        
-        # Only keep columns that actually exist in the data
-        cols_to_keep = [col for col in cols_to_keep if col in data.columns]
-        data = data[cols_to_keep]
-        self.logger.info("Columns to keep filtered")
-
-        # Create positive pairs
-        positive_pairs = data[['artist_id', 'track_id', 'genre']].drop_duplicates()
-        self.logger.info("Duplicates deleted")
-        positive_pairs['interaction'] = 1
-        
-        # Create artist-track-genre map
-        for _, row in positive_pairs.iterrows():
-            self.artist_track_map[row['artist_id']].add(row['track_id'])
-            self.genre_map[row['artist_id']] = row['genre']
-        self.logger.info("Artist-track-genre map created")
-        
-        # Generate negative samples
-        negative_samples = []
-        all_tracks = set(data['track_id'].unique())
-        self.logger.info("Generating negative samples...")
-
-        for artist in self.artist_track_map:
-            artist_tracks = self.artist_track_map[artist]
-            negative_tracks = list(all_tracks - artist_tracks)
-            
-            if negative_tracks:
-                sampled_negatives = np.random.choice(
-                    negative_tracks, 
-                    size=min(len(artist_tracks), len(negative_tracks)), 
-                    replace=False
-                )
-                for track in sampled_negatives:
-                    negative_samples.append({
-                        'artist_id': artist,
-                        'track_id': track,
-                        'genre': self.genre_map[artist],
-                        'interaction': 0
-                    })
-
-        negative_pairs = pd.DataFrame(negative_samples)
-        all_pairs = pd.concat([positive_pairs, negative_pairs])
-        self.logger.info(f"Created {len(negative_pairs)} negative samples")
-        self.logger.info(f"Total pairs: {len(all_pairs)}")
-
-        # Add track features
-        self.track_features = data.drop(columns=['artist_id', 'interaction'], errors='ignore').drop_duplicates('track_id')
-        all_pairs = all_pairs.merge(self.track_features, on='track_id')
-        self.logger.info("Added track features")
-
-        # Hierarchical clustering
-        self._apply_hierarchical_clustering(all_pairs)
-        self.logger.info("Applied hierarchical clustering")
-        
-        # Encode categorical features
-        self.label_encoders['artist_id'] = LabelEncoder().fit(all_pairs['artist_id'])
-        self.label_encoders['track_id'] = LabelEncoder().fit(all_pairs['track_id'])
-        self.logger.info("Encoded categorical features")
-        
-        # Create mappings
-        self.track_id_map = dict(zip(all_pairs['track_id'], all_pairs['track_id'].astype('category').cat.codes))
-        self.artist_id_map = dict(zip(all_pairs['artist_id'], all_pairs['artist_id'].astype('category').cat.codes))
-        self.logger.info("Created ID mappings")
-        
-        # Scale numerical features
-        numeric_cols = [col for col in all_pairs.columns if col not in ['artist_id', 'track_id', 'genre', 'interaction', 'cluster']]
-        all_pairs[numeric_cols] = self.scaler.fit_transform(all_pairs[numeric_cols])
-        self.logger.info("Scaled numerical features")
-        
-        return all_pairs
-    
-    def _get_feature_strategy(self, strategy='content'):
-        """Functional feature selection strategy"""
-        if strategy == 'content':
-            return ['acousticness', 'danceability', 'energy', 'valence', 'tempo']
-        elif strategy == 'extended':
-            return ['acousticness', 'danceability', 'duration_ms', 'energy',
-                   'instrumentalness', 'liveness', 'loudness', 'speechiness',
-                   'tempo', 'valence']
-        else:
-            return ['danceability', 'energy', 'valence']
-    
-    def _apply_hierarchical_clustering(self, data):
-        """Apply hierarchical clustering to tracks"""
-        cluster_features = data[['danceability', 'energy', 'valence']].values
-        Z = linkage(cluster_features, method='ward')
-        self.cluster_labels = fcluster(Z, t=3, criterion='maxclust')
-        data['cluster'] = self.cluster_labels
-        
-        # Visualize with Seaborn
-        cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
-        grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
-        self._save_visualization(grid, "hierarchical_clustering")
-        
-    def initialize_model(self, hyperparams=None):
-        """Initialize SVD model with optional hyperparameters"""
-        if hyperparams:
-            self.model = SVD(
-                n_factors=hyperparams['n_factors'],
-                n_epochs=hyperparams['n_epochs'],
-                lr_all=hyperparams['lr_all'],
-                reg_all=hyperparams['reg_all'],
-                random_state=42
-            )
-            self.best_hyperparams = hyperparams
-        else:
-            self.model = SVD(
-                n_factors=50,
-                n_epochs=20,
-                lr_all=0.005,
-                reg_all=0.02,
-                random_state=42
-            )
-    
-    def tune_hyperparameters(self, data, max_evals=30):
-        """Hyperparameter tuning with GridSearchCV"""
-        self.logger.info("\nStarting hyperparameter tuning...")
-        
-        # Prepare data for Surprise
-        reader = Reader(rating_scale=(0, 1))
-        surprise_data = Dataset.load_from_df(data[['artist_id', 'track_id', 'interaction']], reader)
-        
-        param_grid = {
-            'n_factors': [20, 50, 100],
-            'n_epochs': [10, 20, 30],
-            'lr_all': [0.002, 0.005, 0.01],
-            'reg_all': [0.01, 0.02, 0.04]
-        }
-        
-        gs = GridSearchCV(SVD, param_grid, measures=['rmse', 'mae'], cv=3, n_jobs=-1)
-        gs.fit(surprise_data)
-        
-        # Get best params
-        best_params = {
-            'n_factors': gs.best_params['rmse']['n_factors'],
-            'n_epochs': gs.best_params['rmse']['n_epochs'],
-            'lr_all': gs.best_params['rmse']['lr_all'],
-            'reg_all': gs.best_params['rmse']['reg_all']
-        }
-        
-        self.logger.info(f"Best RMSE: {gs.best_score['rmse']}")
-        self.logger.info(f"Best MAE: {gs.best_score['mae']}")
-        self.logger.info(f"Best params: {best_params}")
-        
-        # Initialize model with best params
-        self.initialize_model(best_params)
-        
-        return best_params
-    
     def train_model(self, data):
-        """Train SVD model with full dataset"""
-        self.logger.info("\nStarting model training...")
+        self.logger.info("Starting SVD training...")
         start_time = time.time()
-        
-        # Prepare data for Surprise
-        reader = Reader(rating_scale=(0, 1))
+        reader = Reader(rating_scale=(0, 1))  # Bo 'interaction' 0 lub 1
         surprise_data = Dataset.load_from_df(data[['artist_id', 'track_id', 'interaction']], reader)
-        
-        # Build full trainset
-        trainset = surprise_data.build_full_trainset()
-        
-        # Train model
+        # Podział train/val taki jak w deep learning
+        all_rows = data.copy()
+        X_train, X_val = train_test_split(all_rows, test_size=0.2, random_state=42, stratify=all_rows['interaction'])
+
+        # Konwersja na Surprise set
+        surprise_train = Dataset.load_from_df(X_train[['artist_id', 'track_id', 'interaction']], reader)
+        surprise_val = Dataset.load_from_df(X_val[['artist_id', 'track_id', 'interaction']], reader)
+        trainset = surprise_train.build_full_trainset()
         self.model.fit(trainset)
-        
-        # Training time
-        training_time = time.time() - start_time
-        self.metrics_history['training_time'].append(training_time)
-        self.logger.info(f"Training completed in {training_time:.2f} seconds")
-        
-        # Cross-validation
-        self.logger.info("\nRunning cross-validation...")
-        cv_results = cross_validate(
-            self.model, 
-            surprise_data, 
-            measures=['rmse', 'mae'], 
-            cv=5, 
-            n_jobs=-1,
-            verbose=True
-        )
-        
-        # Log CV results
-        self.logger.info("\nCross-validation results:")
-        for metric in ['rmse', 'mae']:
-            self.logger.info(f"{metric}: {np.mean(cv_results[f'test_{metric}']):.4f} (±{np.std(cv_results[f'test_{metric}']):.4f})")
-            self.metrics_history[metric].append(np.mean(cv_results[f'test_{metric}']))
-        
-        # Generate predictions for all data
-        testset = trainset.build_anti_testset()
-        predictions = self.model.test(testset)
-        
-        # Extract true and predicted values
-        y_true = np.array([pred.r_ui for pred in predictions])
-        y_pred = np.array([pred.est for pred in predictions])
-        
-        # Calculate additional metrics
-        metrics = self._calculate_metrics(y_true, y_pred, y_proba=y_pred)
-        additional_metrics = self._calculate_additional_metrics(y_true, y_pred, y_proba=y_pred)
-        
-        # Update metrics history
-        for metric, value in {**metrics, **additional_metrics}.items():
-            if metric in self.metrics_history:
-                self.metrics_history[metric].append(value)
-        
-        # Plot metrics and feature importance
-        self._plot_metrics_history()
+
+        # Predykcje train
+        train_preds = []
+        for _, row in X_train.iterrows():
+            pred = self.model.predict(row['artist_id'], row['track_id']).est
+            train_preds.append(pred)
+        y_train_true = X_train['interaction'].values
+        y_train_pred = np.array(train_preds)
+
+        # Predykcje val
+        val_preds = []
+        for _, row in X_val.iterrows():
+            pred = self.model.predict(row['artist_id'], row['track_id']).est
+            val_preds.append(pred)
+        y_val_true = X_val['interaction'].values
+        y_val_pred = np.array(val_preds)
+
+        # Ewaluacja
+        tmetrics = self._calculate_metrics(y_train_true, y_train_pred, y_proba=y_train_pred, threshold=0.4)
+        vmetrics = self._calculate_metrics(y_val_true, y_val_pred, y_proba=y_val_pred, threshold=0.4)
+        # Zbierz do historii analogicznie jak w DL
+        self.metrics_history['train_rmse'].append(tmetrics['rmse'])
+        self.metrics_history['val_rmse'].append(vmetrics['rmse'])
+        self.metrics_history['train_mae'].append(tmetrics['mae'])
+        self.metrics_history['val_mae'].append(vmetrics['mae'])
+        self.metrics_history['train_auc'].append(tmetrics.get('roc_auc', 0))
+        self.metrics_history['val_auc'].append(vmetrics.get('roc_auc', 0))
+        self.metrics_history['train_precision'].append(tmetrics['precision'])
+        self.metrics_history['val_precision'].append(vmetrics['precision'])
+        self.metrics_history['train_recall'].append(tmetrics['recall'])
+        self.metrics_history['val_recall'].append(vmetrics['recall'])
+        self.metrics_history['training_time'].append(time.time() - start_time)
+        self._plot_training_history()
         self._plot_feature_importance()
-        
-        # Save model
         model_path = self._save_model()
-        
+        print("train_model SVD completed.")
         return model_path
-    
+
     def recommend_tracks(self, artist_id, top_n=5):
-        """Generate recommendations for given artist"""
-        if self.model is None:
-            raise ValueError("Model not trained yet.")
-        
-        if artist_id not in self.artist_id_map:
-            self.logger.info(f"Artist {artist_id} not seen during training. Returning popular tracks.")
+        if artist_id not in self.label_encoders['artist_id'].classes_:
             return self._get_popular_tracks(top_n)
-        
-        # Get all tracks in same cluster
-        artist_tracks = list(self.artist_track_map[artist_id])
-        if len(artist_tracks) > 0:
-            sample_track = artist_tracks[0]
+        # Zbierz tracki w tym samym klastrze
+        artist_tracks = list(self.track_features[self.track_features['track_id'].isin(
+            [t for t in self.artist_track_map.get(artist_id, [])])]['track_id'])
+        sample_track = artist_tracks[0] if artist_tracks else None
+        if sample_track is not None:
             cluster = self.track_features[self.track_features['track_id'] == sample_track]['cluster'].values[0]
             candidate_tracks = self.track_features[self.track_features['cluster'] == cluster]['track_id'].unique()
         else:
             candidate_tracks = self.track_features['track_id'].unique()
-        
-        # Generate predictions
+            cluster = None
         predictions = []
         for track_id in candidate_tracks:
-            if track_id in self.track_id_map:
-                pred = self.model.predict(artist_id, track_id)
-                track_data = self.track_features[self.track_features['track_id'] == track_id].iloc[0]
-                
-                predictions.append({
-                    'track_id': track_id,
-                    'score': pred.est,
-                    'danceability': track_data['danceability'],
-                    'energy': track_data['energy'],
-                    'valence': track_data['valence'],
-                    'cluster': cluster
-                })
-        
-        # Sort and get top recommendations
+            pred = self.model.predict(artist_id, track_id)
+            track_data = self.track_features[self.track_features['track_id'] == track_id]
+            if track_data.empty: continue
+            row = track_data.iloc[0]
+            predictions.append({
+                'track_id': track_id,
+                'score': pred.est,
+                'danceability': row['danceability'],
+                'energy': row['energy'],
+                'valence': row['valence'],
+                'cluster': row['cluster']
+            })
         predictions.sort(key=lambda x: x['score'], reverse=True)
         return predictions[:top_n]
-    
+
+    def recommend_similar_tracks(self, base_track_id, top_n=5):
+        # Uwaga! Oparto o podobieństwo cech latentnych itemów (qi), nie cech oryginalnych
+        if base_track_id not in self.label_encoders['track_id'].classes_:
+            return []
+        idx = list(self.label_encoders['track_id'].classes_).index(base_track_id)
+        track_emb = self.model.qi[idx]  # latent vector for track
+        # For all tracks, get latent embeddings
+        all_vecs = self.model.qi
+        # exclude self
+        track_idx_all = np.arange(len(all_vecs))
+        base_idx = idx
+        candidate_idx = track_idx_all[track_idx_all != base_idx]
+        candidate_vecs = all_vecs[candidate_idx]
+        scores = cosine_similarity([track_emb], candidate_vecs)[0]
+        top_idx = np.argsort(scores)[::-1][:top_n]
+        # map back to track ids
+        all_tracks = np.array(self.label_encoders['track_id'].classes_)[candidate_idx]
+        recs = []
+        for i, idxi in enumerate(top_idx):
+            t_id = all_tracks[idxi]
+            row = self.track_features[self.track_features['track_id'] == t_id]
+            recs.append({
+                'track_id': t_id,
+                'score': scores[idxi],
+                'danceability': row['danceability'].values[0] if not row.empty else np.nan,
+                'energy': row['energy'].values[0] if not row.empty else np.nan,
+                'valence': row['valence'].values[0] if not row.empty else np.nan,
+                'cluster': row['cluster'].values[0] if not row.empty else '-',
+            })
+        return recs
+
+    def compute_similarity_metrics(self, base_track_id, recs, metric='cosine'):
+        base_vec = self.track_features[self.track_features['track_id'] == base_track_id][self.feature_cols].values
+        if base_vec.shape[0] == 0:
+            print("Base track not found!")
+            return {}
+        rec_vecs = []
+        for r in recs:
+            vec = self.track_features[self.track_features['track_id'] == r['track_id']][self.feature_cols].values
+            if vec.shape[0] > 0:
+                rec_vecs.append(vec[0])
+        rec_vecs = np.array(rec_vecs)
+        if rec_vecs.shape[0] == 0:
+            print("No vectors for recommended tracks!")
+            return {}
+        if metric == 'cosine':
+            sims = cosine_similarity(base_vec, rec_vecs)[0]
+            stat = {
+                'mean_cosine_similarity': np.mean(sims),
+                'median_cosine_similarity': np.median(sims),
+                'min_cosine_similarity': np.min(sims),
+                'max_cosine_similarity': np.max(sims)
+            }
+        else:
+            dists = euclidean_distances(base_vec, rec_vecs)[0]
+            stat = {
+                'mean_euclidean_distance': np.mean(dists),
+                'median_euclidean_distance': np.median(dists),
+                'min_euclidean_distance': np.min(dists),
+                'max_euclidean_distance': np.max(dists)
+            }
+        return stat
+
     def _get_popular_tracks(self, top_n=5):
-        """Fallback method using cluster information"""
         if self.track_features is None:
             return []
-        
         popular_tracks = self.track_features.sort_values(
             by=['danceability', 'energy'], 
             ascending=False
         ).head(top_n)
-        
-        return popular_tracks.to_dict('records')
-    
+        result = []
+        for _, row in popular_tracks.iterrows():
+            d = row.to_dict()
+            d['score'] = None
+            result.append(d)
+        return result
+
     def _setup_logging(self, experiment_name):
-        """Configure logging to file and console"""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -537,32 +523,54 @@ class SVDBasedRecommender:
 
 # Example usage
 if __name__ == "__main__":
-    recommender = SVDBasedRecommender("svd_rec_experiment1")
-    
+    # --- Pipepline Batch SVD Recommender ---
+
+    # 1. Inicjalizacja eksperymentu
+    recommender = BatchSVDRecommender("batch_svd_experiment1")
+
     try:
-        # Step 1: Preprocess data with hierarchical clustering
-        data = recommender.preprocess_data("../../../data/ten_thousand.csv", sample_size=1000)
-        
-        # Step 2: Hyperparameter tuning
-        best_params = recommender.tune_hyperparameters(data, max_evals=30)
-        recommender.logger.info(f"\nBest hyperparameters: {best_params}")
-        
-        # Step 3: Train model
+        # 2. ETAP: Preprocessing i featury
+        data = recommender.preprocess_data_balanced("../../../data/ten_thousand.csv", sample_size=1000)
+        data = recommender.rebalance_global_positive_negative_pairs(data)
+
+        # 3. ETAP: Inicjalizacja i tuning modelu SVD 
+        recommender.initialize_model(
+            n_factors=32,     # Sugerowane: mniejsza wartość, np. 16/24/32
+            n_epochs=20, 
+            lr_all=0.005, 
+            reg_all=0.02      # Rozważ wyższą (0.05+), jeśli overfitting
+        )
+        # lub użyj recommender.gridsearch_model(data) jeśli chcesz automatyczny tuning
+
+        # 4. ETAP: Trening modelu + ewaluacja metryk + rysowanie wykresów
         model_path = recommender.train_model(data)
         recommender.logger.info(f"\nModel trained and saved to: {model_path}")
-        
-        # Step 4: Get recommendations
-        example_artist = data['artist_id'].iloc[0]
-        recommender.logger.info(f"\nRecommendations for artist {example_artist}:")
-        recs = recommender.recommend_tracks(example_artist, top_n=5)
-        
-        recommender.logger.info("\nTop recommendations:")
+
+        # 5. ETAP: Rekomendacje podobnych utworów
+        example_track = data['track_id'].iloc[0]
+        recs = recommender.recommend_similar_tracks(
+            base_track_id=example_track, 
+            top_n=5
+        )
+
+        # 6. ETAP: Logowanie rekomendacji (opcjonalnie wyjście na stdout/plik/log)
+        recommender.logger.info('\nTop recommendations:')
         for i, rec in enumerate(recs, 1):
             recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | "
-                f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
+                f"{i}. Track ID: {rec['track_id']} | "
+                f"Score: {rec['score']:.3f} | "
+                f"Dance: {rec['danceability']:.2f} | "
+                f"Energy: {rec['energy']:.2f} | "
                 f"Cluster: {rec['cluster']}"
             )
-            
+
+        # 7. ETAP: Statystyki wektorowego podobieństwa
+        metrics = recommender.compute_similarity_metrics(
+            base_track_id=example_track, 
+            recs=recs, 
+            metric='cosine'
+        )
+        print("Statystyki podobieństwa dla rekomendacji:", metrics)
+
     except Exception as e:
         recommender.logger.error(f"Experiment failed: {str(e)}", exc_info=True)
