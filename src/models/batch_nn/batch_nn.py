@@ -9,8 +9,8 @@ from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder
 from sklearn.metrics import (mean_squared_error, precision_score, recall_score, 
                            f1_score, roc_auc_score, average_precision_score,
                            confusion_matrix, classification_report, log_loss, silhouette_score)
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import cosine
 import time
 import seaborn as sns
 import os
@@ -794,6 +794,50 @@ class DeepLearningRecommender:
             })
         return recs
     
+    def compute_similarity_metrics(self, base_track_id, recs, metric='cosine'):
+        """
+        Porównuje każdy utwór z recs do bazowego i zwraca statystyki podobieństw
+        :param base_track_id: track_id utworu bazowego
+        :param recs: lista rekomendacji (dictów)
+        :param metric: 'cosine' lub 'euclidean'
+        :return: dict ze statystykami dla topn rekomendacji
+        """
+        # Wektor bazowy
+        base_vec = self.track_features[self.track_features['track_id'] == base_track_id][self.feature_cols].values
+        if base_vec.shape[0] == 0:
+            print("Base track not found!")
+            return {}
+        rec_vecs = []
+        for r in recs:
+            vec = self.track_features[self.track_features['track_id'] == r['track_id']][self.feature_cols].values
+            if vec.shape[0] > 0:
+                rec_vecs.append(vec[0])
+
+        rec_vecs = np.array(rec_vecs)
+        if rec_vecs.shape[0] == 0:
+            print("No vectors for recommended tracks!")
+            return {}
+
+        # Oblicz metryki
+        if metric == 'cosine':
+            sims = cosine_similarity(base_vec, rec_vecs)[0]
+            # Blisko 1 = bardzo podobne
+            stat = {
+                'mean_cosine_similarity': np.mean(sims),
+                'median_cosine_similarity': np.median(sims),
+                'min_cosine_similarity': np.min(sims),
+                'max_cosine_similarity': np.max(sims)
+            }
+        else:
+            dists = euclidean_distances(base_vec, rec_vecs)[0]
+            stat = {
+                'mean_euclidean_distance': np.mean(dists),
+                'median_euclidean_distance': np.median(dists),
+                'min_euclidean_distance': np.min(dists),
+                'max_euclidean_distance': np.max(dists)
+            }
+        return stat
+    
     def _get_popular_tracks(self, top_n=5):
         """Fallback method using cluster information"""
         if self.track_features is None:
@@ -853,6 +897,12 @@ if __name__ == "__main__":
                 f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
                 f"Cluster: {rec['cluster']}"
             )
+
+        # Po wyciągnięciu recs = recommender.recommend_similar_tracks(…)
+        metrics = recommender.compute_similarity_metrics(
+        base_track_id='0009Q7nGlWjFzSjQIo9PmK', recs=recs, metric='cosine'
+    )
+        print("Statystyki podobieństwa dla rekomendacji:", metrics)
             
     except Exception as e:
         recommender.logger.error(f"Experiment failed: {str(e)}", exc_info=True)
