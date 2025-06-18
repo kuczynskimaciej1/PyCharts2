@@ -1,5 +1,3 @@
-from surprise import Dataset, Reader, accuracy
-#from surprise.model_selection import train_test_split
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
@@ -8,7 +6,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder
 from sklearn.metrics import (mean_squared_error, precision_score, recall_score, 
                            f1_score, roc_auc_score, average_precision_score,
-                           confusion_matrix, classification_report, log_loss, silhouette_score)
+                           confusion_matrix, classification_report, silhouette_score)
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from scipy.cluster.hierarchy import linkage, fcluster
 import time
@@ -20,6 +18,9 @@ from datetime import datetime
 import warnings
 import logging
 import tensorflow as tf
+import random
+import json
+import shap
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (Input, Embedding, Flatten, Dense, 
                                     Concatenate, Dropout, BatchNormalization,
@@ -442,27 +443,53 @@ class DeepLearningRecommender:
         else:
             return ['danceability', 'energy', 'valence']
     
+    def log_model_stats(self):
+        """Log and save general model statistics and structure."""
+        try:
+            stats = {}
+            stats['num_trainable_params'] = self.model.count_params()
+            stats['model_size_MB'] = self.model.count_params() * 4 / (1024 ** 2)  # float32 = 4B
+            # Save model summary to text file
+            summary_lines = []
+            self.model.summary(print_fn=lambda x: summary_lines.append(x))
+            summary_path = f"{self.output_dir}/models/model_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(summary_path, "w") as f:
+                f.write('\n'.join(summary_lines))
+            
+            self.logger.info(f"Model trainable params: {stats['num_trainable_params']}")
+            self.logger.info(f"Model size (float32, MB): {stats['model_size_MB']:.2f}")
+            self.logger.info(f"Saved model summary: {summary_path}")
+
+            # Dump to JSON if needed
+            import json
+            stats_path = f"{self.output_dir}/models/model_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(stats_path, "w") as f:
+                json.dump(stats, f, indent=2)
+            
+            return stats
+        except Exception as e:
+            self.logger.error(f"Could not log model stats: {e}")
+            return {}
+    
     def _apply_hierarchical_clustering(self, data, n_clusters = 6):
-        """Apply hierarchical clustering to tracks"""
         cluster_features = data[self.feature_cols].fillna(0).values
         Z = linkage(cluster_features, method='ward')
         self.cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
-        
-        # Ensure we're assigning to the DataFrame correctly
         data['cluster'] = self.cluster_labels
-        
-        # Verify assignment
-        if 'cluster' not in data.columns:
-            raise ValueError("Failed to add cluster labels to DataFrame")
-        
         # Visualize with Seaborn
         try:
             cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
-            grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
-            self._save_visualization(grid.fig, "hierarchical_clustering")  # Note: using grid.fig
+            # KLUCZOWA ZMIANA: s=15, alpha=0.3 (mniej nachodzą!):
+            grid = sns.pairplot(
+                cluster_data,
+                hue='cluster',
+                palette='viridis',
+                plot_kws={'s': 15, 'alpha': 0.3},   # <-- OTO TE PARAMETRY
+                diag_kws={'alpha': 0.3}
+            )
+            self._save_visualization(grid.fig, "hierarchical_clustering")
         except Exception as e:
             self.logger.error(f"Could not visualize clusters: {str(e)}")
-
         return data
         
     def _build_model(self, num_artists, num_tracks, feature_dim, hyperparams):
@@ -661,6 +688,7 @@ class DeepLearningRecommender:
                 
                 # Plot feature importance
                 self._plot_feature_importance()
+                self.plot_shap(data)
                 
                 # Save model
                 model_path = self._save_model()
@@ -869,40 +897,186 @@ class DeepLearningRecommender:
         )
         self.logger = logging.getLogger(experiment_name)
 
+    def compute_diversity(self, recs):
+        """Compute average pairwise distance in feature space among recommended tracks - im wyżej tym większa różnorodność."""
+        try:
+            feature_matrix = []
+            for rec in recs:
+                row = self.track_features[self.track_features['track_id'] == rec['track_id']]
+                if not row.empty:
+                    feature_matrix.append(row[self.feature_cols].values[0])
+            X = np.array(feature_matrix)
+            if X.shape[0] < 2:
+                return np.nan
+            from scipy.spatial.distance import pdist
+            avg_dist = np.mean(pdist(X, metric='euclidean'))
+            self.logger.info(f"Diversity (avg. Euclidean distance): {avg_dist:.4f}")
+            return avg_dist
+        except Exception as e:
+            self.logger.error(f"Failed to compute diversity: {e}")
+            return np.nan
+    
+    def plot_shap(self, data, nsamples=200):
+        try:
+            # Bierzemy losową próbkę, żeby nie zamulić!
+            sample = data.sample(nsamples, random_state=1)
+            X_artist = self.label_encoders['artist_id'].transform(sample['artist_id'])
+            X_track = self.label_encoders['track_id'].transform(sample['track_id'])
+            X_features = sample[self.feature_cols].values
+
+            # SHAP potrzebuje wejścia jako 2D array (tu wszystkie x razem, potem się wyciąga)
+            def keras_input(X):
+                # Helper do explainerów, konwertuje np. array do listy wejść do modelu
+                return [X_artist, X_track, X_features]
+
+            explainer = shap.KernelExplainer(
+                (lambda x: self.model.predict([x[:, 0].reshape(-1, 1), x[:, 1].reshape(-1, 1), x[:, 2:]])),
+                np.c_[X_artist, X_track, X_features]
+            )
+            shap_values = explainer.shap_values(np.c_[X_artist, X_track, X_features], nsamples=100)
+            # Nazwy cech: embeddingi, a potem cechy oryginalne
+            feature_names = (
+                ['artist_id', 'track_id'] + list(self.feature_cols)
+            )
+            fig = shap.summary_plot(
+                shap_values, np.c_[X_artist, X_track, X_features],
+                feature_names=feature_names, 
+                plot_type="bar",
+                show=False
+            )
+            plt.title("SHAP feature importances: NN inputs")
+            self._save_visualization(plt.gcf(), "shap_summary")
+        except Exception as e:
+            self.logger.warning(f"Could not plot SHAP: {e}")
+    
+    def compute_coverage(self, all_recommendations):
+        """Procent unikalnych tracków poleconych spośród wszystkich w zbiorze."""
+        unique_tracks = set()
+        for recs in all_recommendations:
+            for rec in recs:
+                unique_tracks.add(rec['track_id'])
+        coverage = len(unique_tracks) / len(self.track_features)
+        self.logger.info(f"Coverage: {coverage:.3%}")
+        return coverage
+    
+    def jaccard_set_similarity(self, recs_model1, recs_model2):
+        set1 = set(rec['track_id'] for rec in recs_model1)
+        set2 = set(rec['track_id'] for rec in recs_model2)
+        if len(set1 | set2) == 0:
+            return np.nan
+        return len(set1 & set2) / len(set1 | set2)
+    
+    def measure_inference_time(self, artist_id, n_trials=20):
+        import time
+        times = []
+        for _ in range(n_trials):
+            t0 = time.time()
+            try:
+                _ = self.recommend_tracks(artist_id)
+            except Exception:
+                continue
+            t1 = time.time()
+            times.append(t1 - t0)
+        mean_time = np.mean(times)
+        self.logger.info(f"Average inference time ({n_trials} trials): {mean_time:.4f} s")
+        return mean_time
+    
+    def compute_stability(self, list_of_metric_dicts, metric='val_rmse'):
+        vals = [metrics[metric] for metrics in list_of_metric_dicts if metric in metrics]
+        stdev = np.std(vals)
+        self.logger.info(f"Stability for {metric}: std={stdev:.4f}, mean={np.mean(vals):.4f}")
+        return stdev
+
 # Example usage
 if __name__ == "__main__":
-    recommender = DeepLearningRecommender("dl_rec_experiment1")
-    
+    DATA_PATH = "../../../data/ten_thousand.csv"
+    EXPERIMENT_NAME = "dl_rec_experiment1"
+    N_TEST_ARTISTS = 10    # liczba artystów do testowania rekomendacji
+
+    np.random.seed(42)
+    random.seed(42)
+
+    recommender = DeepLearningRecommender(EXPERIMENT_NAME)
     try:
         # Step 1: Preprocess data with hierarchical clustering
-        data = recommender.preprocess_data("../../../data/ten_thousand.csv", sample_size=1000)
-        
-        # Step 2: Initialize model with default hyperparameters
+        data = recommender.preprocess_data(DATA_PATH)
+
+        # Step 2: Initialize and train model
         recommender.initialize_model(data)
-        
-        # Step 3: Train model
         model_path = recommender.train_model(data)
         recommender.logger.info(f"\nModel trained and saved to: {model_path}")
-        
-        # Step 4: Get recommendations
-        example_artist = data['artist_id'].iloc[0]
-        recommender.logger.info(f"\nRecommendations for artist {example_artist}:")
-        #recs = recommender.recommend_tracks(example_artist, top_n=5)
-        recs = recommender.recommend_similar_tracks(base_track_id='0009Q7nGlWjFzSjQIo9PmK')
-        
-        recommender.logger.info("\nTop recommendations:")
-        for i, rec in enumerate(recs, 1):
-            recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | Score: {rec['score']:.3f} | "
-                f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
-                f"Cluster: {rec['cluster']}"
-            )
+        model_stats = recommender.log_model_stats()
 
-        # Po wyciągnięciu recs = recommender.recommend_similar_tracks(…)
-        metrics = recommender.compute_similarity_metrics(
-        base_track_id='0009Q7nGlWjFzSjQIo9PmK', recs=recs, metric='cosine'
-    )
-        print("Statystyki podobieństwa dla rekomendacji:", metrics)
-            
+        # Step 3: Ewaluacja na kilku artystach
+        test_artists = data['artist_id'].drop_duplicates().sample(min(N_TEST_ARTISTS, data['artist_id'].nunique()), random_state=42).tolist()
+        all_recs = []
+        diversity_scores = []
+        sim_metrics_scores = []
+
+        for artist_id in test_artists:
+            recommender.logger.info(f"\nRecommendations for artist {artist_id}:")
+            recs = recommender.recommend_tracks(artist_id, top_n=5)
+            all_recs.append(recs)
+            for i, rec in enumerate(recs, 1):
+                recommender.logger.info(
+                    f"{i}. Track ID: {rec['track_id']} "
+                    f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
+                    f"Cluster: {rec['cluster']}"
+                )
+
+            # Diversity
+            diversity = recommender.compute_diversity(recs)
+            diversity_scores.append(diversity)
+
+            # Similarity metrics względem top 1 tracku z rekomendacji
+            if recs:
+                base_track = recs[0]['track_id']
+                sim_metrics = recommender.compute_similarity_metrics(base_track, recs, metric='cosine')
+                sim_metrics_scores.append(sim_metrics)
+                recommender.logger.info(f"Artist {artist_id} - Similarity metrics for top recs: {sim_metrics}")
+
+        # Step 4: Coverage
+        coverage = recommender.compute_coverage(all_recs)
+        recommender.logger.info(f"Model coverage: {coverage:.3%}")
+
+        # Step 5: Rysowanie wykresów boxplot diversity/similarity
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(diversity_scores)
+        plt.title("Rekomendacje: różnorodność (diversity, dystans euklidesowy)")
+        plt.ylabel("Dystans euklidesowy")
+        plt.tight_layout()
+        plot_path_div = f"{recommender.output_dir}/plots/diversity_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_div)
+        plt.close()
+
+        mean_cosine_list = [d.get('mean_cosine_similarity', np.nan) for d in sim_metrics_scores]
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(mean_cosine_list)
+        plt.title("Rekomendacje: średnie podobieństwo kosinusowe do bazowego utworu")
+        plt.ylabel("Mean cosine similarity")
+        plt.tight_layout()
+        plot_path_sim = f"{recommender.output_dir}/plots/cosine_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_sim)
+        plt.close()
+
+        # Step 6: Pomiar czasu odpowiedzi dla inference
+        mean_infer_time = recommender.measure_inference_time(test_artists[0], n_trials=10)
+
+        # Step 7: Raport
+        report = {
+            "model_stats": model_stats,
+            "coverage": coverage,
+            "diversity_median": float(np.median([d for d in diversity_scores if not np.isnan(d)])),
+            "diversity_mean": float(np.mean([d for d in diversity_scores if not np.isnan(d)])),
+            "mean_cosine_similarity_median": float(np.median([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_cosine_similarity_mean": float(np.mean([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_inference_time_s": mean_infer_time
+        }
+        with open(f"{recommender.output_dir}/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
+            json.dump(report, f, indent=2)
+        recommender.logger.info(f"Summary report: {report}")
+
+        print("FINISHED!")
+
     except Exception as e:
         recommender.logger.error(f"Experiment failed: {str(e)}", exc_info=True)

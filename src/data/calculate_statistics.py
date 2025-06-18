@@ -10,6 +10,8 @@ original_stdout = sys.stdout
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 output_filename = f'spotify_analysis_report_{timestamp}.txt'
 
+df = None
+
 with open(output_filename, 'w') as f:
     sys.stdout = f
     
@@ -19,7 +21,7 @@ with open(output_filename, 'w') as f:
     try:
         # Wczytanie danych
         print("Ładowanie danych...")
-        df = pd.read_csv('spotify_tracks.csv')  # Zmień nazwę pliku jeśli potrzeba
+        df = pd.read_csv('../../data/full.csv')  # Zmień nazwę pliku jeśli potrzeba
         
         # Usunięcie kolumny indeksującej
         if 'Unnamed: 0' in df.columns:
@@ -106,10 +108,10 @@ with open(output_filename, 'w') as f:
         sys.stdout = original_stdout
         print(f"Pełny raport został zapisany do: {output_filename}")
 
-    # Wyświetlenie podsumowania w konsoli
-    print(f"Analiza zakończona. Wyniki zapisano w:")
-    print(f"- Raport tekstowy: {output_filename}")
-    print(f"- Macierz korelacji: correlation_matrix_{timestamp}.png")
-    print(f"- Histogramy: histogram_*_{timestamp}.png")
-    if 'explicit' in df.columns:
-        print(f"- Rozkład treści eksplicytnych: explicit_distribution_{timestamp}.png")
+# Wyświetlenie podsumowania w konsoli
+print(f"Analiza zakończona. Wyniki zapisano w:")
+print(f"- Raport tekstowy: {output_filename}")
+print(f"- Macierz korelacji: correlation_matrix_{timestamp}.png")
+print(f"- Histogramy: histogram_*_{timestamp}.png")
+if 'explicit' in df.columns:
+    print(f"- Rozkład treści eksplicytnych: explicit_distribution_{timestamp}.png")

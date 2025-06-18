@@ -1,4 +1,4 @@
-from surprise import SVD, Dataset, Reader, accuracy
+from surprise import SVD, Dataset, Reader
 from sklearn.model_selection import train_test_split, GridSearchCV
 import pandas as pd
 import numpy as np
@@ -6,7 +6,9 @@ from collections import defaultdict
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 from sklearn.metrics import (mean_squared_error, precision_score, recall_score, f1_score, 
                              roc_auc_score, average_precision_score, confusion_matrix, 
-                             classification_report, log_loss, silhouette_score)
+                             classification_report, silhouette_score)
+import shap
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from scipy.cluster.hierarchy import linkage, fcluster
 import time
@@ -17,6 +19,8 @@ import joblib
 from datetime import datetime
 import warnings
 import logging
+import json
+import random
 
 warnings.filterwarnings('ignore')
 
@@ -134,6 +138,61 @@ class BatchSVDRecommender:
         plt.close(fig)
         self.logger.info(f"Saved feature distributions: {path}")
 
+        # --- Zaawansowane metryki i raporty jak w DeepLearningRecommender ---
+
+    def compute_diversity(self, recs):
+        """Compute avg pairwise distance (diversity) in oryginalnym feature space."""
+        feature_matrix = []
+        for rec in recs:
+            row = self.track_features[self.track_features['track_id'] == rec['track_id']]
+            if not row.empty:
+                feature_matrix.append(row[self.feature_cols].values[0])
+        X = np.array(feature_matrix)
+        if X.shape[0] < 2:
+            return np.nan
+        from scipy.spatial.distance import pdist
+        avg_dist = np.mean(pdist(X, metric='euclidean'))
+        self.logger.info(f"Diversity (avg. Euclidean distance): {avg_dist:.4f}")
+        return avg_dist
+
+    def compute_coverage(self, all_recommendations):
+        """Procent unikalnych tracków poleconych spośród wszystkich w zbiorze."""
+        unique_tracks = set()
+        for recs in all_recommendations:
+            for rec in recs:
+                unique_tracks.add(rec['track_id'])
+        coverage = len(unique_tracks) / len(self.track_features)
+        self.logger.info(f"Coverage: {coverage:.3%}")
+        return coverage
+
+    def jaccard_set_similarity(self, recs_model1, recs_model2):
+        set1 = set(rec['track_id'] for rec in recs_model1)
+        set2 = set(rec['track_id'] for rec in recs_model2)
+        if len(set1 | set2) == 0:
+            return np.nan
+        return len(set1 & set2) / len(set1 | set2)
+
+    def measure_inference_time(self, artist_id, n_trials=20):
+        import time
+        times = []
+        for _ in range(n_trials):
+            t0 = time.time()
+            try:
+                _ = self.recommend_tracks(artist_id)
+            except Exception:
+                continue
+            t1 = time.time()
+            times.append(t1 - t0)
+        mean_time = np.mean(times)
+        self.logger.info(f"Average inference time ({n_trials} trials): {mean_time:.4f} s")
+        return mean_time
+
+    def compute_stability(self, list_of_metric_dicts, metric='val_rmse'):
+        vals = [metrics[metric] for metrics in list_of_metric_dicts if metric in metrics]
+        stdev = np.std(vals)
+        self.logger.info(f"Stability for {metric}: std={stdev:.4f}, mean={np.mean(vals):.4f}")
+        return stdev
+
     def plot_elbow_and_silhouette(self, data, max_clusters=10):
         features = data[self.feature_cols].fillna(0).values
         inertias, silhouettes = [], []
@@ -154,28 +213,55 @@ class BatchSVDRecommender:
         plt.close(fig)
 
     def _plot_training_history(self):
-        # Plots for training metrics
         hist = self.metrics_history
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        # RMSE/MAE
-        axes[0, 0].plot(hist['train_rmse'], label='Train RMSE')
-        axes[0, 0].plot(hist['val_rmse'], label='Val RMSE')
-        axes[0, 0].set_title('RMSE'); axes[0, 0].legend()
-        axes[0, 1].plot(hist['train_mae'], label='Train MAE')
-        axes[0, 1].plot(hist['val_mae'], label='Val MAE')
-        axes[0, 1].set_title('MAE'); axes[0, 1].legend()
+
+        bar_width = 0.35
+        index = np.arange(1)  # tylko jeden punkt!
+        # RMSE
+        axes[0,0].bar(index, hist['train_rmse'], bar_width, label='Train RMSE')
+        axes[0,0].bar(index+bar_width, hist['val_rmse'], bar_width, label='Val RMSE')
+        axes[0,0].set_title('RMSE'); axes[0,0].legend()
+        # MAE
+        axes[0,1].bar(index, hist['train_mae'], bar_width, label='Train MAE')
+        axes[0,1].bar(index+bar_width, hist['val_mae'], bar_width, label='Val MAE')
+        axes[0,1].set_title('MAE'); axes[0,1].legend()
         # AUC
-        axes[1, 0].plot(hist['train_auc'], label='Train AUC')
-        axes[1, 0].plot(hist['val_auc'], label='Val AUC')
-        axes[1, 0].set_title('AUC'); axes[1, 0].legend()
-        # Precision, Recall
-        axes[1, 1].plot(hist['train_precision'], label='Train Prec')
-        axes[1, 1].plot(hist['val_precision'], label='Val Prec')
-        axes[1, 1].plot(hist['train_recall'], label='Train Rec')
-        axes[1, 1].plot(hist['val_recall'], label='Val Rec')
-        axes[1, 1].set_title('Precision/Recall'); axes[1, 1].legend()
+        axes[1,0].bar(index, hist['train_auc'], bar_width, label='Train AUC')
+        axes[1,0].bar(index+bar_width, hist['val_auc'], bar_width, label='Val AUC')
+        axes[1,0].set_title('AUC'); axes[1,0].legend()
+        # Precision/Recall
+        axes[1,1].bar(index, hist['train_precision'], bar_width, label='Train Prec')
+        axes[1,1].bar(index+bar_width, hist['val_precision'], bar_width, label='Val Prec')
+        axes[1,1].bar(index, hist['train_recall'], bar_width, label='Train Rec', alpha=0.5, bottom=hist['train_precision'])
+        axes[1,1].bar(index+bar_width, hist['val_recall'], bar_width, label='Val Rec', alpha=0.5, bottom=hist['val_precision'])
+        axes[1,1].set_title('Precision/Recall'); axes[1,1].legend()
         plt.tight_layout()
         self._save_visualization(fig, "training_history")
+
+    def plot_shap(self, data):
+        try:
+
+            tracks_le = self.label_encoders['track_id']
+            artists_le = self.label_encoders['artist_id']
+            # Zbierz embeddingi userów/tracks jako features
+            user_indices = artists_le.transform(data['artist_id'])
+            item_indices = tracks_le.transform(data['track_id'])
+            X = np.concatenate([
+                self.model.pu[user_indices],      # user embeddings
+                self.model.qi[item_indices],      # item embeddings
+                data[self.feature_cols].values    # content features
+            ], axis=1)
+            y = data['interaction'].values
+            model = RandomForestRegressor(n_estimators=40, random_state=1)
+            model.fit(X, y)
+            explainer = shap.Explainer(model, X)
+            shap_values = explainer(X[:200])
+            fig = shap.plots.beeswarm(shap_values, max_display=20, show=False)
+            plt.title("SHAP feature importances (users/items/content)")
+            self._save_visualization(plt.gcf(), "shap_summary")
+        except Exception as e:
+            self.logger.warning(f"Could not plot SHAP: {e}")
 
     def _plot_feature_importance(self):
         # SVD nie ma feature importance, ale można wykreslić wariancję faktorów
@@ -268,7 +354,13 @@ class BatchSVDRecommender:
         # Visualization
         try:
             cluster_data = data[['danceability', 'energy', 'valence', 'cluster']]
-            grid = sns.pairplot(cluster_data, hue='cluster', palette='viridis')
+            grid = sns.pairplot(
+                cluster_data, 
+                hue='cluster', 
+                palette='viridis',
+                plot_kws={'s':15, 'alpha':0.3},   # <-- tu!
+                diag_kws={'alpha':0.3}
+            )
             self._save_visualization(grid.fig, "hierarchical_clustering")
         except Exception as e:
             self.logger.error(f"Could not visualize clusters: {str(e)}")
@@ -398,6 +490,7 @@ class BatchSVDRecommender:
         self.metrics_history['training_time'].append(time.time() - start_time)
         self._plot_training_history()
         self._plot_feature_importance()
+        self.plot_shap(data)
         model_path = self._save_model()
         print("train_model SVD completed.")
         return model_path
@@ -523,54 +616,102 @@ class BatchSVDRecommender:
 
 # Example usage
 if __name__ == "__main__":
-    # --- Pipepline Batch SVD Recommender ---
 
-    # 1. Inicjalizacja eksperymentu
-    recommender = BatchSVDRecommender("batch_svd_experiment1")
+    DATA_PATH = "../../../data/ten_thousand.csv"
+    EXPERIMENT_NAME = "batch_svd_experiment1"
+    N_TEST_ARTISTS = 10
 
+    recommender = BatchSVDRecommender(EXPERIMENT_NAME)
     try:
-        # 2. ETAP: Preprocessing i featury
-        data = recommender.preprocess_data_balanced("../../../data/ten_thousand.csv", sample_size=1000)
+        # 1. ETAP: Preprocessing i balanced negatywne próbki, featury, klastrowanie
+        data = recommender.preprocess_data_balanced(DATA_PATH, sample_size=1000)
         data = recommender.rebalance_global_positive_negative_pairs(data)
 
-        # 3. ETAP: Inicjalizacja i tuning modelu SVD 
+        # 2. ETAP: Inicjalizacja/tuning modelu SVD
         recommender.initialize_model(
-            n_factors=32,     # Sugerowane: mniejsza wartość, np. 16/24/32
-            n_epochs=20, 
-            lr_all=0.005, 
-            reg_all=0.02      # Rozważ wyższą (0.05+), jeśli overfitting
+            n_factors=32,
+            n_epochs=20,
+            lr_all=0.005,
+            reg_all=0.02
         )
-        # lub użyj recommender.gridsearch_model(data) jeśli chcesz automatyczny tuning
+        # Alternatywnie: recommender.gridsearch_model(data)
 
-        # 4. ETAP: Trening modelu + ewaluacja metryk + rysowanie wykresów
+        # 3. ETAP: Trening modelu + metryki + wykresy
         model_path = recommender.train_model(data)
         recommender.logger.info(f"\nModel trained and saved to: {model_path}")
 
-        # 5. ETAP: Rekomendacje podobnych utworów
-        example_track = data['track_id'].iloc[0]
-        recs = recommender.recommend_similar_tracks(
-            base_track_id=example_track, 
-            top_n=5
-        )
+        # 4. ETAP: Ocena rekomendacji na wielu artystach
+        test_artists = data['artist_id'].drop_duplicates().sample(
+            min(N_TEST_ARTISTS, data['artist_id'].nunique()), random_state=42
+        ).tolist()
+        all_recs = []
+        diversity_scores = []
+        sim_metrics_scores = []
 
-        # 6. ETAP: Logowanie rekomendacji (opcjonalnie wyjście na stdout/plik/log)
-        recommender.logger.info('\nTop recommendations:')
-        for i, rec in enumerate(recs, 1):
-            recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | "
-                f"Score: {rec['score']:.3f} | "
-                f"Dance: {rec['danceability']:.2f} | "
-                f"Energy: {rec['energy']:.2f} | "
-                f"Cluster: {rec['cluster']}"
-            )
+        for artist_id in test_artists:
+            recommender.logger.info(f"\nRecommendations for artist {artist_id}:")
+            recs = recommender.recommend_tracks(artist_id, top_n=5)
+            all_recs.append(recs)
+            for i, rec in enumerate(recs, 1):
+                recommender.logger.info(
+                    f"{i}. Track ID: {rec['track_id']} "
+                    f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
+                    f"Cluster: {rec['cluster']}"
+                )
 
-        # 7. ETAP: Statystyki wektorowego podobieństwa
-        metrics = recommender.compute_similarity_metrics(
-            base_track_id=example_track, 
-            recs=recs, 
-            metric='cosine'
-        )
-        print("Statystyki podobieństwa dla rekomendacji:", metrics)
+            # Różnorodność (diversity)
+            diversity = recommender.compute_diversity(recs)
+            diversity_scores.append(diversity)
+
+            # Podobieństwo względem top1 utworu
+            if recs:
+                base_track = recs[0]['track_id']
+                sim_metrics = recommender.compute_similarity_metrics(base_track, recs, metric='cosine')
+                sim_metrics_scores.append(sim_metrics)
+                recommender.logger.info(f"Artist {artist_id} - Similarity metrics for top recs: {sim_metrics}")
+
+        # 5. ETAP: Coverage modelu
+        coverage = recommender.compute_coverage(all_recs)
+        recommender.logger.info(f"Model coverage: {coverage:.3%}")
+
+        # 6. ETAP: Rysowanie boxplotów diversity i similarity
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(diversity_scores)
+        plt.title("Rekomendacje: różnorodność (diversity, dystans euklidesowy)")
+        plt.ylabel("Dystans euklidesowy")
+        plt.tight_layout()
+        plot_path_div = f"{recommender.output_dir}/plots/diversity_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_div)
+        plt.close()
+
+        mean_cosine_list = [d.get('mean_cosine_similarity', np.nan) for d in sim_metrics_scores]
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(mean_cosine_list)
+        plt.title("Rekomendacje: średnie podobieństwo kosinusowe do bazowego utworu")
+        plt.ylabel("Mean cosine similarity")
+        plt.tight_layout()
+        plot_path_sim = f"{recommender.output_dir}/plots/cosine_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_sim)
+        plt.close()
+
+        # 7. ETAP: Pomiar średniego czasu rekomendacji jednego artysty
+        mean_infer_time = recommender.measure_inference_time(test_artists[0], n_trials=10)
+
+        # 8. ETAP: Raport końcowy - eksport do pliku JSON
+        report = {
+            "coverage": coverage,
+            "diversity_median": float(np.median([d for d in diversity_scores if not np.isnan(d)])),
+            "diversity_mean": float(np.mean([d for d in diversity_scores if not np.isnan(d)])),
+            "mean_cosine_similarity_median": float(np.median([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_cosine_similarity_mean": float(np.mean([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_inference_time_s": mean_infer_time
+        }
+        report_path = f"{recommender.output_dir}/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+        recommender.logger.info(f"Summary report: {report}")
+
+        print("FINISHED!")
 
     except Exception as e:
         recommender.logger.error(f"Experiment failed: {str(e)}", exc_info=True)

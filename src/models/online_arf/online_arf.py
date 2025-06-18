@@ -3,6 +3,7 @@ from river.forest import ARFClassifier
 import numpy as np
 import pandas as pd
 import os
+import json
 from collections import defaultdict
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 from sklearn.model_selection import train_test_split
@@ -194,6 +195,45 @@ class OnlineARFRecommender:
         ax.set_title('Confusion Matrix')
         self._save_visualization(fig, "confusion_matrix")
         return metrics_out
+    
+    def compute_diversity(self, recs):
+        """Compute avg pairwise distance (diversity) in feature space among recommended tracks."""
+        feature_matrix = []
+        for rec in recs:
+            row = self.track_features[self.track_features['track_id'] == rec['track_id']]
+            if not row.empty:
+                feature_matrix.append(row[self.feature_cols].values[0])
+        X = np.array(feature_matrix)
+        if X.shape[0] < 2:
+            return np.nan
+        from scipy.spatial.distance import pdist
+        avg_dist = np.mean(pdist(X, metric='euclidean'))
+        self.logger.info(f"Diversity (avg. Euclidean distance): {avg_dist:.4f}")
+        return avg_dist
+
+    def compute_coverage(self, all_recommendations):
+        unique_tracks = set()
+        for recs in all_recommendations:
+            for rec in recs:
+                unique_tracks.add(rec['track_id'])
+        coverage = len(unique_tracks) / len(self.track_features)
+        self.logger.info(f"Coverage: {coverage:.3%}")
+        return coverage
+
+    def measure_inference_time(self, track_id, n_trials=20):
+        import time
+        times = []
+        for _ in range(n_trials):
+            t0 = time.time()
+            try:
+                _ = self.recommend_similar_tracks(track_id)
+            except Exception:
+                continue
+            t1 = time.time()
+            times.append(t1 - t0)
+        mean_time = np.mean(times)
+        self.logger.info(f"Average inference time ({n_trials} trials): {mean_time:.4f} s")
+        return mean_time
 
     def preprocess_data_balanced(
         self, 
@@ -507,12 +547,15 @@ class OnlineARFRecommender:
 
 # --- Przykładowe użycie (pipeline bliźniaczy do SVD!) ---
 if __name__ == "__main__":
-    recommender = OnlineARFRecommender("online_arf_experiment1")
+    DATA_PATH = "../../../data/ten_thousand.csv"
+    EXPERIMENT_NAME = "online_arf_experiment1"
+    N_TEST_TRACKS = 10
+
+    recommender = OnlineARFRecommender(EXPERIMENT_NAME)
 
     try:
         # 1. Przetwarzanie i featury (tak samo jak w SVD)
-        data = recommender.preprocess_data_balanced("../../../data/ten_thousand.csv", sample_size=1000)
-        # Rebalancing, jeśli potrzebny – jak w BatchSVD
+        data = recommender.preprocess_data_balanced(DATA_PATH, sample_size=1000)
         data = recommender.rebalance_global_positive_negative_pairs(data)
 
         # 2. Inicjalizacja i ewentualny tuning
@@ -526,31 +569,78 @@ if __name__ == "__main__":
         model_path = recommender.train_model(data)
         recommender.logger.info(f"\nModel trained and saved to: {model_path}")
 
-        # 4. Rekomendacje podobnych utworów (bliźniaczy interfejs do recommend_similar_tracks)
-        example_track = data['track_id'].iloc[0]
-        recs = recommender.recommend_similar_tracks(
-            base_track_id=example_track,
-            top_n=5
-        )
+        # 4. Rekomendacje podobnych utworów dla N tracków
+        test_tracks = data['track_id'].drop_duplicates().sample(
+            min(N_TEST_TRACKS, data['track_id'].nunique()), random_state=42
+        ).tolist()
+        all_recs = []
+        diversity_scores = []
+        sim_metrics_scores = []
 
-        # 5. Logowanie rekomendacji
-        recommender.logger.info('\nTop recommendations:')
-        for i, rec in enumerate(recs, 1):
-            recommender.logger.info(
-                f"{i}. Track ID: {rec['track_id']} | "
-                f"Score: {rec['score']:.3f} | "
-                f"Dance: {rec['danceability']:.2f} | "
-                f"Energy: {rec['energy']:.2f} | "
-                f"Cluster: {rec['cluster']}"
-            )
+        for track_id in test_tracks:
+            recommender.logger.info(f"\nSimilar tracks for base track_id {track_id}:")
+            recs = recommender.recommend_similar_tracks(base_track_id=track_id, top_n=5)
+            all_recs.append(recs)
+            for i, rec in enumerate(recs, 1):
+                recommender.logger.info(
+                    f"{i}. Track ID: {rec['track_id']} "
+                    f"Dance: {rec['danceability']:.2f} | Energy: {rec['energy']:.2f} | "
+                    f"Cluster: {rec['cluster']}"
+                )
+            # Diversity
+            diversity = recommender.compute_diversity(recs)
+            diversity_scores.append(diversity)
 
-        # 6. Statystyki podobieństwa
-        metrics = recommender.compute_similarity_metrics(
-            base_track_id=example_track,
-            recs=recs,
-            metric='cosine'
-        )
-        print("Statystyki podobieństwa dla rekomendacji:", metrics)
+            # Similarity metrics względem top 1 tracku z rekomendacji
+            if recs:
+                base_track = recs[0]['track_id']
+                sim_metrics = recommender.compute_similarity_metrics(base_track, recs, metric='cosine')
+                sim_metrics_scores.append(sim_metrics)
+                recommender.logger.info(f"Base track {track_id} - Similarity metrics for top recs: {sim_metrics}")
+
+        # 5. Coverage
+        coverage = recommender.compute_coverage(all_recs)
+        recommender.logger.info(f"Model coverage: {coverage:.3%}")
+
+        # 6. Wykresy diversity/similarity
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(diversity_scores)
+        plt.title("Rekomendacje: różnorodność (diversity, dystans euklidesowy)")
+        plt.ylabel("Dystans euklidesowy")
+        plt.tight_layout()
+        plot_path_div = f"{recommender.output_dir}/plots/diversity_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_div)
+        plt.close()
+
+        mean_cosine_list = [d.get('mean_cosine_similarity', np.nan) for d in sim_metrics_scores]
+        plt.figure(figsize=(8, 4))
+        sns.boxplot(mean_cosine_list)
+        plt.title("Rekomendacje: średnie podobieństwo kosinusowe do bazowego utworu")
+        plt.ylabel("Mean cosine similarity")
+        plt.tight_layout()
+        plot_path_sim = f"{recommender.output_dir}/plots/cosine_boxplot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(plot_path_sim)
+        plt.close()
+
+        # 7. Czas inference
+        mean_infer_time = recommender.measure_inference_time(test_tracks[0], n_trials=10)
+
+        # 8. Raport
+        report = {
+            "coverage": coverage,
+            "diversity_median": float(np.median([d for d in diversity_scores if not np.isnan(d)])),
+            "diversity_mean": float(np.mean([d for d in diversity_scores if not np.isnan(d)])),
+            "mean_cosine_similarity_median": float(np.median([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_cosine_similarity_mean": float(np.mean([m for m in mean_cosine_list if not np.isnan(m)])),
+            "mean_inference_time_s": mean_infer_time
+        }
+        report_path = f"{recommender.output_dir}/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+        recommender.logger.info(f"Summary report: {report}")
+
+        print("FINISHED!")
+
     except Exception as e:
         recommender.logger.error(f"ARF Experiment failed: {str(e)}", exc_info=True)
            
